@@ -42,7 +42,7 @@ def build_auth_params():
     return headers, params
 
 
-async def api_request(method: str, endpoint: str,  Dict = None, params: Dict = None, max_retries: int = 3):
+async def api_request(method: str, endpoint: str, data: Dict = None, params: Dict = None, max_retries: int = 3):
     """Универсальный запрос к API MAX"""
     headers, auth_params = build_auth_params()
     all_params = {**(params or {}), **auth_params}
@@ -109,7 +109,7 @@ async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
     return "error" not in result
 
 
-async def publish_to_channel(post_ Dict) -> bool:
+async def publish_to_channel(post_data: Dict) -> bool:
     """Публикация поста в канал"""
     try:
         buttons = []
@@ -130,16 +130,14 @@ async def webhook_handler(request):
         update = await request.json()
         logger.info(f"📥 Webhook: {json.dumps(update, ensure_ascii=False)[:300]}")
         
-        # 🔧 Извлекаем сообщение (пробуем разные форматы)
         message = update.get("message") or update.get("body") or update.get("data") or update
         if isinstance(message, dict):
             chat_id = message.get("from", {}).get("id") or message.get("user_id") or message.get("chat_id")
-            # 🔧 Извлекаем текст из разных возможных мест
             text = message.get("text")
             if not text and isinstance(message.get("body"), dict):
                 text = message["body"].get("text")
             if not text:
-                text = message.get("body")  # если текст сразу в body
+                text = message.get("body")
         else:
             chat_id = None
             text = None
@@ -150,7 +148,6 @@ async def webhook_handler(request):
         
         logger.info(f"💬 От {chat_id}: {text}")
         
-        # Обработка команд
         if text == "/start":
             kb = {"inline_keyboard": [[{"text": "➕ Новый пост", "callback_data": "new_post"}], [{"text": "ℹ️ Помощь", "callback_data": "help"}]]}
             await send_message(chat_id, "👋 **MAX Channel Poster**\n\nНажми «Новый пост»", kb)
@@ -189,7 +186,6 @@ async def webhook_handler(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
-# 🔥 ЭНДПОИНТЫ СЕРВЕРА
 async def health_check(request):
     return web.json_response({"status": "ok"})
 
@@ -206,7 +202,6 @@ async def on_cleanup(app):
     if api_session:
         await api_session.close()
 
-# Создаём приложение
 app = web.Application()
 app.add_routes([
     web.get('/', root_handler),
