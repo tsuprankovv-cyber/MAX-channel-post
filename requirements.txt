@@ -1,3 +1,2 @@
 maxapi>=0.1.0
-asyncpg
 python-dotenv
