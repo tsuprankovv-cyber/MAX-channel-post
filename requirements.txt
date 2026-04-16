@@ -1,2 +1,2 @@
-maxapi>=0.1.0
+maxbot>=0.1.8
 python-dotenv
