@@ -26,7 +26,6 @@ api_session: Optional[ClientSession] = None
 
 
 def build_auth_params():
-    """Возвращает заголовки и параметры для авторизации"""
     headers = {"Content-Type": "application/json", "User-Agent": "MAX-Poster/1.0"}
     params = {}
     if MAX_AUTH_TYPE == 'bearer':
@@ -42,8 +41,7 @@ def build_auth_params():
     return headers, params
 
 
-async def api_request(method: str, endpoint: str, data: Dict = None, params: Dict = None, max_retries: int = 3):
-    """Универсальный запрос к API MAX"""
+async def api_request(method: str, endpoint: str,  Dict = None, params: Dict = None, max_retries: int = 3):
     headers, auth_params = build_auth_params()
     all_params = {**(params or {}), **auth_params}
     url = f"{BASE_API_URL}{endpoint}"
@@ -52,25 +50,18 @@ async def api_request(method: str, endpoint: str, data: Dict = None, params: Dic
     for attempt in range(max_retries):
         try:
             async with api_session.request(
-                method=method,
-                url=url,
-                headers=headers,
-                params=all_params,
-                json=data,
-                timeout=timeout
+                method=method, url=url, headers=headers,
+                params=all_params, json=data, timeout=timeout
             ) as response:
                 text = await response.text()
-                
                 if response.status == 429:
                     wait = min(int(response.headers.get('Retry-After', 30)), 120)
                     logger.warning(f"⏳ Rate limit. Ждём {wait}с...")
                     await asyncio.sleep(wait)
                     continue
-                
                 if response.status == 401:
                     logger.error(f"❌ AUTH FAILED: {text[:200]}")
                     return {"error": "auth_failed"}
-                
                 if response.status == 200:
                     try:
                         result = json.loads(text) if text.strip() else {}
@@ -79,45 +70,42 @@ async def api_request(method: str, endpoint: str, data: Dict = None, params: Dic
                         return result
                     except:
                         return {"raw": text}
-                
                 logger.warning(f"HTTP {response.status}: {text[:200]}")
-                
         except Exception as e:
             logger.error(f"Request error (attempt {attempt+1}): {e}")
-        
         if attempt < max_retries - 1:
             await asyncio.sleep(2 ** attempt)
-    
     return {"error": "max_retries"}
 
 
 async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
-    """Отправка сообщения пользователю"""
     buttons = []
     if keyboard and "inline_keyboard" in keyboard:
         for row in keyboard["inline_keyboard"]:
             for btn in row:
                 btn_data = {"text": btn.get("text", "")}
-                if btn.get("url"):
-                    btn_data["url"] = btn["url"]
-                if btn.get("callback_data"):
-                    btn_data["callback_data"] = btn["callback_data"]
+                if btn.get("url"): btn_data["url"] = btn["url"]
+                if btn.get("callback_data"): btn_data["callback_data"] = btn["callback_data"]
                 buttons.append(btn_data)
     
-    payload = {"text": text, "buttons": buttons}
-    result = await api_request("POST", f"/messages?user_id={chat_id}", data=payload)
+    payload = {"text": text, "buttons": buttons if buttons else []}
+    
+    # 🔧 Исправленный эндпоинт (ресурсный стиль)
+    endpoint = f"/chats/{chat_id}/messages"
+    
+    result = await api_request("POST", endpoint, data=payload)
     return "error" not in result
 
 
-async def publish_to_channel(post_data: Dict) -> bool:
-    """Публикация поста в канал"""
+async def publish_to_channel(post_ Dict) -> bool:
     try:
         buttons = []
         if post_data.get('button_title') and post_data.get('button_url'):
             buttons.append({"text": post_data['button_title'], "url": post_data['button_url']})
-        
-        payload = {"text": post_data.get('text', ''), "buttons": buttons}
-        result = await api_request("POST", f"/channels/{CHANNEL_ID}/messages", data=payload)
+        payload = {"text": post_data.get('text', ''), "buttons": buttons if buttons else []}
+        # 🔧 Публикация в канал через правильный эндпоинт
+        endpoint = f"/channels/{CHANNEL_ID}/messages"
+        result = await api_request("POST", endpoint, data=payload)
         return "error" not in result
     except Exception as e:
         logger.error(f"Publish error: {e}")
@@ -125,7 +113,6 @@ async def publish_to_channel(post_data: Dict) -> bool:
 
 
 async def webhook_handler(request):
-    """Принимает обновления от MAX API"""
     try:
         update = await request.json()
         logger.info(f"📥 Webhook: {json.dumps(update, ensure_ascii=False)[:300]}")
@@ -139,8 +126,7 @@ async def webhook_handler(request):
             if not text:
                 text = message.get("body")
         else:
-            chat_id = None
-            text = None
+            chat_id, text = None, None
         
         if not chat_id:
             logger.warning("❌ Не удалось определить chat_id")
@@ -151,20 +137,16 @@ async def webhook_handler(request):
         if text == "/start":
             kb = {"inline_keyboard": [[{"text": "➕ Новый пост", "callback_data": "new_post"}], [{"text": "ℹ️ Помощь", "callback_data": "help"}]]}
             await send_message(chat_id, "👋 **MAX Channel Poster**\n\nНажми «Новый пост»", kb)
-        
         elif text == "/post":
             user_sessions[chat_id] = {"step": "waiting_text"}
             await send_message(chat_id, "📝 Отправь текст поста")
-        
         elif chat_id in user_sessions:
             sd = user_sessions[chat_id]
             step = sd.get("step")
-            
             if step == "waiting_text":
                 sd["text"] = text
                 sd["step"] = "waiting_button"
                 await send_message(chat_id, "🔘 Кнопка: `Текст | ссылка`\nИли `пропустить`")
-            
             elif step == "waiting_button":
                 if text and text.lower() not in ("пропустить", "skip", "-"):
                     if "|" in text:
@@ -174,13 +156,11 @@ async def webhook_handler(request):
                     else:
                         await send_message(chat_id, "❌ Формат: `Текст | ссылка`")
                         return web.json_response({"ok": True})
-                
                 ok = await publish_to_channel(sd)
                 await send_message(chat_id, "✅ Опубликовано!" if ok else "❌ Ошибка")
                 del user_sessions[chat_id]
         
         return web.json_response({"ok": True})
-    
     except Exception as e:
         logger.error(f"💥 Webhook error: {e}", exc_info=True)
         return web.json_response({"ok": False, "error": str(e)}, status=500)
