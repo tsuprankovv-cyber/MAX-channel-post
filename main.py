@@ -5,7 +5,7 @@ import json
 from typing import Dict, Optional
 
 import aiohttp
-from aiohttp import ClientTimeout
+from aiohttp import ClientTimeout, web
 from dotenv import load_dotenv
 
 logging.basicConfig(
@@ -19,6 +19,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv('MAX_BOT_TOKEN')
 CHANNEL_ID = os.getenv('MAX_CHANNEL_ID')
 BASE_API_URL = "https://platform-api.max.ru"
+PORT = int(os.getenv('PORT', 10000))
 
 user_sessions: Dict[int, Dict] = {}
 session: Optional[aiohttp.ClientSession] = None
@@ -27,7 +28,7 @@ session: Optional[aiohttp.ClientSession] = None
 async def api_request(method: str, endpoint: str, data: Dict = None, params: Dict = None) -> Dict:
     """Универсальный запрос к API MAX"""
     headers = {
-        "Authorization": BOT_TOKEN,  # Токен без "Bearer"
+        "Authorization": BOT_TOKEN,
         "Content-Type": "application/json"
     }
     
@@ -109,10 +110,7 @@ async def publish_to_channel(post_data: Dict) -> bool:
 
 
 async def get_updates(marker: int = None, timeout: int = 30) -> list:
-    """
-    Long polling для получения обновлений.
-    Использует GET /updates согласно документации [citation:5]
-    """
+    """Long polling для получения обновлений"""
     params = {"timeout": timeout}
     if marker:
         params["marker"] = marker
@@ -203,6 +201,30 @@ async def handle_callback(callback: Dict):
         )
 
 
+# ===== HEALTH-СЕРВЕР ДЛЯ RENDER =====
+async def health_check(request):
+    """Health check endpoint для Render"""
+    return web.json_response({"status": "healthy", "bot": "running"})
+
+
+async def run_health_server():
+    """Запускает HTTP-сервер для health check"""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"✅ Health-сервер запущен на порту {PORT}")
+    
+    # Держим сервер живым
+    while True:
+        await asyncio.sleep(3600)
+
+
+# ===== ОСНОВНОЙ ЗАПУСК =====
 async def main():
     global session
     
@@ -212,9 +234,12 @@ async def main():
     logger.info(f"🌐 API URL: {BASE_API_URL}")
     
     session = aiohttp.ClientSession()
-    marker = None
     
-    logger.info("✅ Бот запущен в режиме Long Polling [citation:5]")
+    # Запускаем health-сервер в фоне
+    asyncio.create_task(run_health_server())
+    
+    marker = None
+    logger.info("✅ Бот запущен в режиме Long Polling")
     logger.info("📨 Ожидание сообщений...")
     
     try:
@@ -224,6 +249,10 @@ async def main():
             for update in updates:
                 logger.info(f"Обработка update: {json.dumps(update, ensure_ascii=False)[:200]}")
                 
+                if "message" in update:
+                    await handle_message(update["message"])
+                if "callback" in update:
+                    await handle_callback(update["callback"])
                 if "message_created" in update:
                     await handle_message(update["message_created"])
                 if "message_callback" in update:
@@ -231,6 +260,8 @@ async def main():
                 
                 if "marker" in update:
                     marker = update["marker"]
+                elif "update_id" in update:
+                    marker = update["update_id"] + 1
             
             await asyncio.sleep(0.5)
     except KeyboardInterrupt:
