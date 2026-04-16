@@ -27,16 +27,12 @@ session: Optional[aiohttp.ClientSession] = None
 async def api_request(method: str, endpoint: str, data: Dict = None, params: Dict = None) -> Dict:
     """Универсальный запрос к API MAX"""
     headers = {
-        "Authorization": BOT_TOKEN,
+        "Authorization": BOT_TOKEN,  # Токен без "Bearer"
         "Content-Type": "application/json"
     }
     
     url = f"{BASE_API_URL}{endpoint}"
     logger.info(f"API {method} {url}")
-    if params:
-        logger.info(f"Params: {params}")
-    if data:
-        logger.info(f"Data: {json.dumps(data, ensure_ascii=False)[:200]}")
     
     timeout = ClientTimeout(total=30)
     
@@ -51,7 +47,6 @@ async def api_request(method: str, endpoint: str, data: Dict = None, params: Dic
         ) as response:
             text = await response.text()
             logger.info(f"Response status: {response.status}")
-            logger.info(f"Response body: {text[:500]}")
             
             if response.status == 200:
                 try:
@@ -59,7 +54,7 @@ async def api_request(method: str, endpoint: str, data: Dict = None, params: Dic
                 except:
                     return {"raw": text}
             else:
-                logger.error(f"HTTP {response.status}: {text}")
+                logger.error(f"HTTP {response.status}: {text[:500]}")
                 return {"error": f"HTTP {response.status}", "detail": text}
     except Exception as e:
         logger.error(f"Request error: {e}")
@@ -67,7 +62,7 @@ async def api_request(method: str, endpoint: str, data: Dict = None, params: Dic
 
 
 async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
-    """Отправка сообщения пользователю"""
+    """Отправка сообщения пользователю (через /messages)"""
     payload = {"text": text}
     if keyboard:
         payload["attachments"] = [{
@@ -84,7 +79,7 @@ async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
 
 
 async def publish_to_channel(post_data: Dict) -> bool:
-    """Публикация в канал"""
+    """Публикация поста в канал"""
     try:
         keyboard = None
         if 'button_title' in post_data and 'button_url' in post_data:
@@ -114,7 +109,10 @@ async def publish_to_channel(post_data: Dict) -> bool:
 
 
 async def get_updates(marker: int = None, timeout: int = 30) -> list:
-    """Long polling для получения обновлений"""
+    """
+    Long polling для получения обновлений.
+    Использует GET /updates согласно документации [citation:2]
+    """
     params = {"timeout": timeout}
     if marker:
         params["marker"] = marker
@@ -130,16 +128,21 @@ async def get_updates(marker: int = None, timeout: int = 30) -> list:
 
 async def handle_message(message: Dict):
     """Обработка входящего сообщения"""
-    # Структура сообщения из API MAX
-    chat_id = message.get("chat", {}).get("id") or message.get("recipient", {}).get("chat_id")
-    text = message.get("body", {}).get("text", "")
-    
+    # Структура из документации MAX [citation:1]
+    chat_id = message.get("recipient", {}).get("chat_id")
     if not chat_id:
-        # Пробуем другие поля
         chat_id = message.get("from", {}).get("id")
     
-    logger.info(f"Message from {chat_id}: {text[:100] if text else '[no text]'}")
+    body = message.get("body", {})
+    text = body.get("text", "") if isinstance(body, dict) else ""
     
+    if not chat_id:
+        logger.warning(f"Не удалось определить chat_id из сообщения: {message}")
+        return
+    
+    logger.info(f"Сообщение от {chat_id}: {text[:100] if text else '[без текста]'}")
+    
+    # Команда /start
     if text == "/start":
         keyboard = {
             "inline_keyboard": [
@@ -154,6 +157,13 @@ async def handle_message(message: Dict):
         )
         return
     
+    # Команда /post
+    if text == "/post":
+        user_sessions[chat_id] = {"step": "waiting_text"}
+        await send_message(chat_id, "📝 Отправьте текст поста")
+        return
+    
+    # Обработка сессии создания поста
     if chat_id in user_sessions:
         session_data = user_sessions[chat_id]
         step = session_data.get("step")
@@ -182,15 +192,21 @@ async def handle_message(message: Dict):
 
 async def handle_callback(callback: Dict):
     """Обработка нажатий на кнопки"""
-    # Структура callback из API MAX
+    # Структура из документации MAX [citation:1]
     data = callback.get("payload", {}).get("data", "")
-    chat_id = callback.get("user", {}).get("id")
+    user_id = callback.get("user", {}).get("id")
     
-    logger.info(f"Callback from {chat_id}: {data}")
+    logger.info(f"Callback от {user_id}: {data}")
     
     if data == "new_post":
-        user_sessions[chat_id] = {"step": "waiting_text"}
-        await send_message(chat_id, "📝 Отправьте текст поста")
+        user_sessions[user_id] = {"step": "waiting_text"}
+        await send_message(user_id, "📝 Отправьте текст поста")
+    
+    elif data == "help":
+        await send_message(
+            user_id,
+            "📖 **Помощь**\n\n/post — создать пост\n/start — меню\n\nФормат кнопки: Текст | https://ссылка"
+        )
 
 
 async def main():
@@ -204,21 +220,23 @@ async def main():
     session = aiohttp.ClientSession()
     marker = None
     
-    logger.info("✅ Бот запущен, ожидаем сообщения...")
+    logger.info("✅ Бот запущен в режиме Long Polling [citation:2]")
+    logger.info("📨 Ожидание сообщений...")
     
     try:
         while True:
             updates = await get_updates(marker, timeout=30)
             
             for update in updates:
-                logger.info(f"Processing update: {json.dumps(update, ensure_ascii=False)[:200]}")
+                logger.info(f"Обработка update: {json.dumps(update, ensure_ascii=False)[:200]}")
                 
+                # Типы обновлений согласно документации [citation:1]
                 if "message_created" in update:
                     await handle_message(update["message_created"])
                 if "message_callback" in update:
                     await handle_callback(update["message_callback"])
                 
-                # Обновляем marker
+                # Обновляем marker для следующего запроса [citation:2]
                 if "marker" in update:
                     marker = update["marker"]
             
