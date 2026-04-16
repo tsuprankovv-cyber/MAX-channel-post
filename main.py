@@ -4,82 +4,88 @@ import os
 import json
 from typing import Dict, Optional
 
-from aiohttp import ClientSession, ClientTimeout
+import aiohttp
+from aiohttp import ClientTimeout
 from dotenv import load_dotenv
 
-# ===== НАСТРОЙКА ЛОГИРОВАНИЯ =====
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ===== ЗАГРУЗКА ПЕРЕМЕННЫХ =====
 load_dotenv()
 
-BOT_TOKEN = os.getenv('MAX_BOT_TOKEN', 'f9LHodD0cOJ1zU51CUFdStMuwVfX0aNdze31RQduaSV9zy_WezacnZe9eAz0GKesBabkLpdRN_rK6ATTj6Za')
-CHANNEL_ID = int(os.getenv('MAX_CHANNEL_ID', '-72890925476042'))
-BASE_API_URL = "https://api.max.ru"
+BOT_TOKEN = os.getenv('MAX_BOT_TOKEN')
+CHANNEL_ID = os.getenv('MAX_CHANNEL_ID')
+BASE_API_URL = "https://platform-api.max.ru"
 
-# Хранилище сессий пользователей
 user_sessions: Dict[int, Dict] = {}
-
-# Глобальная сессия для HTTP-запросов
-session: Optional[ClientSession] = None
+session: Optional[aiohttp.ClientSession] = None
 
 
-# ===== ФУНКЦИИ ДЛЯ РАБОТЫ С API MAX =====
-async def api_request(method: str, endpoint: str, data: Dict = None) -> Dict:
-    """Универсальная функция для запросов к API MAX"""
+async def api_request(method: str, endpoint: str, data: Dict = None, params: Dict = None) -> Dict:
+    """Универсальный запрос к API MAX"""
     headers = {
-        "Authorization": f"Bearer {BOT_TOKEN}",
+        "Authorization": BOT_TOKEN,
         "Content-Type": "application/json"
     }
     
     url = f"{BASE_API_URL}{endpoint}"
-    logger.info(f"API запрос: {method} {url}")
+    logger.info(f"API {method} {url}")
+    if params:
+        logger.info(f"Params: {params}")
+    if data:
+        logger.info(f"Data: {json.dumps(data, ensure_ascii=False)[:200]}")
     
     timeout = ClientTimeout(total=30)
     
     try:
-        if method.upper() == "GET":
-            async with session.get(url, headers=headers, timeout=timeout) as response:
-                result = await response.json()
-                logger.info(f"API ответ: {response.status}")
-                return result
-        else:
-            async with session.post(url, headers=headers, json=data, timeout=timeout) as response:
-                result = await response.json()
-                logger.info(f"API ответ: {response.status}")
-                return result
+        async with session.request(
+            method=method,
+            url=url,
+            headers=headers,
+            params=params,
+            json=data,
+            timeout=timeout
+        ) as response:
+            text = await response.text()
+            logger.info(f"Response status: {response.status}")
+            logger.info(f"Response body: {text[:500]}")
+            
+            if response.status == 200:
+                try:
+                    return json.loads(text) if text else {}
+                except:
+                    return {"raw": text}
+            else:
+                logger.error(f"HTTP {response.status}: {text}")
+                return {"error": f"HTTP {response.status}", "detail": text}
     except Exception as e:
-        logger.error(f"API ошибка: {e}")
+        logger.error(f"Request error: {e}")
         return {"error": str(e)}
 
 
 async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
-    """Отправляет текстовое сообщение в чат"""
-    try:
-        endpoint = f"/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        }
-        if keyboard:
-            payload["reply_markup"] = json.dumps(keyboard)
-        
-        result = await api_request("POST", endpoint, payload)
-        return "ok" in result.get("status", "") or "message_id" in result
-    except Exception as e:
-        logger.error(f"Ошибка отправки сообщения: {e}")
-        return False
+    """Отправка сообщения пользователю"""
+    payload = {"text": text}
+    if keyboard:
+        payload["attachments"] = [{
+            "type": "inline_keyboard",
+            "payload": keyboard
+        }]
+    
+    result = await api_request(
+        "POST",
+        f"/messages?user_id={chat_id}",
+        data=payload
+    )
+    return "error" not in result
 
 
 async def publish_to_channel(post_data: Dict) -> bool:
-    """Публикует пост в канал"""
+    """Публикация в канал"""
     try:
-        # Формируем клавиатуру с URL-кнопкой
         keyboard = None
         if 'button_title' in post_data and 'button_url' in post_data:
             keyboard = {
@@ -89,192 +95,134 @@ async def publish_to_channel(post_data: Dict) -> bool:
                 }]]
             }
         
-        endpoint = f"/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHANNEL_ID,
-            "text": post_data.get('text', ''),
-            "parse_mode": "Markdown"
-        }
-        
+        payload = {"text": post_data.get('text', '')}
         if keyboard:
-            payload["reply_markup"] = json.dumps(keyboard)
+            payload["attachments"] = [{
+                "type": "inline_keyboard",
+                "payload": keyboard
+            }]
         
-        result = await api_request("POST", endpoint, payload)
-        logger.info(f"Результат публикации: {result}")
-        return "ok" in result.get("status", "") or "message_id" in result
+        result = await api_request(
+            "POST",
+            f"/messages?chat_id={CHANNEL_ID}",
+            data=payload
+        )
+        return "error" not in result
     except Exception as e:
-        logger.error(f"Ошибка публикации в канал: {e}")
+        logger.error(f"Publish error: {e}")
         return False
 
 
-# ===== ФУНКЦИЯ ПОЛУЧЕНИЯ ОБНОВЛЕНИЙ (LONG POLLING) =====
-async def get_updates(offset: int = 0) -> list:
-    """Получает обновления от MAX API"""
-    endpoint = f"/bot{BOT_TOKEN}/getUpdates"
-    payload = {"offset": offset, "timeout": 30}
+async def get_updates(marker: int = None, timeout: int = 30) -> list:
+    """Long polling для получения обновлений"""
+    params = {"timeout": timeout}
+    if marker:
+        params["marker"] = marker
     
-    try:
-        result = await api_request("POST", endpoint, payload)
-        if result.get("ok") and "result" in result:
-            return result["result"]
+    result = await api_request("GET", "/updates", params=params)
+    
+    if "error" in result:
         return []
-    except Exception as e:
-        logger.error(f"Ошибка получения обновлений: {e}")
-        return []
+    
+    # API возвращает { "updates": [...], "marker": ... }
+    return result.get("updates", [])
 
 
-# ===== ОБРАБОТКА СООБЩЕНИЙ =====
 async def handle_message(message: Dict):
-    """Обрабатывает входящее сообщение"""
-    chat_id = message.get("chat", {}).get("id")
-    text = message.get("text", "")
+    """Обработка входящего сообщения"""
+    # Структура сообщения из API MAX
+    chat_id = message.get("chat", {}).get("id") or message.get("recipient", {}).get("chat_id")
+    text = message.get("body", {}).get("text", "")
     
     if not chat_id:
-        return
+        # Пробуем другие поля
+        chat_id = message.get("from", {}).get("id")
     
-    logger.info(f"Сообщение от {chat_id}: {text}")
+    logger.info(f"Message from {chat_id}: {text[:100] if text else '[no text]'}")
     
-    # Команда /start
     if text == "/start":
         keyboard = {
             "inline_keyboard": [
                 [{"text": "➕ Новый пост", "callback_data": "new_post"}],
-                [{"text": "📅 Отложить пост", "callback_data": "schedule_post"}],
                 [{"text": "ℹ️ Помощь", "callback_data": "help"}]
             ]
         }
         await send_message(
             chat_id,
-            "👋 **MAX Channel Poster Bot**\n\nЯ помогаю публиковать посты в каналы.\n\nНажмите **«Новый пост»** чтобы начать",
+            "👋 **MAX Channel Poster Bot**\n\nПубликую посты в канал.\n\nНажмите «Новый пост»",
             keyboard
         )
         return
     
-    # Команда /post
-    if text == "/post":
-        user_sessions[chat_id] = {"step": "waiting_text"}
-        await send_message(chat_id, "📝 **Шаг 1/3: Текст поста**\n\nОтправьте текст поста.")
-        return
-    
-    # Обработка сессии создания поста
     if chat_id in user_sessions:
-        session = user_sessions[chat_id]
-        step = session.get("step")
+        session_data = user_sessions[chat_id]
+        step = session_data.get("step")
         
         if step == "waiting_text":
-            session["text"] = text
-            session["step"] = "waiting_photo"
-            keyboard = {
-                "inline_keyboard": [[{"text": "⏭️ Пропустить фото", "callback_data": "skip_photo"}]]
-            }
+            session_data["text"] = text
+            session_data["step"] = "waiting_button"
             await send_message(
                 chat_id,
-                "🖼️ **Шаг 2/3: Фото**\n\nОтправьте фото для поста (или нажмите «Пропустить фото»)\n\n⚠️ Функция фото временно отключена, фото будет добавлено позже.",
-                keyboard
-            )
-        
-        elif step == "waiting_photo":
-            # Пропускаем фото для тестирования
-            session["photo_id"] = None
-            session["step"] = "waiting_button"
-            keyboard = {
-                "inline_keyboard": [[{"text": "⏭️ Пропустить кнопку", "callback_data": "skip_button"}]]
-            }
-            await send_message(
-                chat_id,
-                "🔘 **Шаг 3/3: URL-кнопка**\n\nОтправьте кнопку в формате:\n`Текст кнопки | https://ссылка.com`\n\nИли нажмите «Пропустить кнопку»",
-                keyboard
+                "🔘 Отправьте кнопку в формате:\n`Текст | https://ссылка`\n\nИли отправьте 'пропустить'"
             )
         
         elif step == "waiting_button":
             if "|" in text:
                 parts = text.split("|", 1)
-                session["button_title"] = parts[0].strip()
-                session["button_url"] = parts[1].strip()
+                session_data["button_title"] = parts[0].strip()
+                session_data["button_url"] = parts[1].strip()
             
-            success = await publish_to_channel(session)
-            
-            if success:
-                await send_message(chat_id, "✅ **Пост успешно опубликован в канале!**")
-            else:
-                await send_message(chat_id, "❌ **Ошибка при публикации.** Проверьте права бота в канале.")
-            
+            success = await publish_to_channel(session_data)
+            await send_message(
+                chat_id,
+                "✅ Пост опубликован!" if success else "❌ Ошибка публикации"
+            )
             del user_sessions[chat_id]
 
 
-async def handle_callback(callback_query: Dict):
-    """Обрабатывает нажатия на inline-кнопки"""
-    data = callback_query.get("data", "")
-    chat_id = callback_query.get("message", {}).get("chat", {}).get("id")
+async def handle_callback(callback: Dict):
+    """Обработка нажатий на кнопки"""
+    # Структура callback из API MAX
+    data = callback.get("payload", {}).get("data", "")
+    chat_id = callback.get("user", {}).get("id")
     
-    if not chat_id:
-        return
-    
-    logger.info(f"Callback от {chat_id}: {data}")
+    logger.info(f"Callback from {chat_id}: {data}")
     
     if data == "new_post":
         user_sessions[chat_id] = {"step": "waiting_text"}
-        await send_message(chat_id, "📝 Отправьте текст поста.")
-    
-    elif data == "skip_photo":
-        if chat_id in user_sessions:
-            user_sessions[chat_id]["photo_id"] = None
-            user_sessions[chat_id]["step"] = "waiting_button"
-            await send_message(chat_id, "🔘 Отправьте кнопку в формате: `Текст | https://ссылка`")
-    
-    elif data == "skip_button":
-        if chat_id in user_sessions:
-            session = user_sessions[chat_id]
-            success = await publish_to_channel(session)
-            if success:
-                await send_message(chat_id, "✅ Пост опубликован в канале!")
-            else:
-                await send_message(chat_id, "❌ Ошибка публикации")
-            del user_sessions[chat_id]
-    
-    elif data == "help":
-        await send_message(
-            chat_id,
-            "📖 **Помощь**\n\n"
-            "• `/post` — создать новый пост\n"
-            "• `/start` — главное меню\n\n"
-            "**Как добавить URL-кнопку:**\n"
-            "Отправьте текст и ссылку через `|`\n"
-            "Пример: `Купить билет | https://example.com`"
-        )
-    
-    elif data == "schedule_post":
-        await send_message(chat_id, "⏰ Функция отложенного поста в разработке.")
+        await send_message(chat_id, "📝 Отправьте текст поста")
 
 
-# ===== ЗАПУСК LONG POLLING =====
 async def main():
     global session
     
     logger.info("🚀 Запуск бота MAX Channel Poster...")
     logger.info(f"📢 Канал ID: {CHANNEL_ID}")
-    logger.info(f"🤖 Бот токен: {BOT_TOKEN[:15]}...")
+    logger.info(f"🤖 Токен: {BOT_TOKEN[:15]}...")
+    logger.info(f"🌐 API URL: {BASE_API_URL}")
     
-    session = ClientSession()
-    offset = 0
+    session = aiohttp.ClientSession()
+    marker = None
     
-    logger.info("✅ Бот запущен и слушает сообщения!")
+    logger.info("✅ Бот запущен, ожидаем сообщения...")
     
     try:
         while True:
-            updates = await get_updates(offset)
+            updates = await get_updates(marker, timeout=30)
             
             for update in updates:
-                if "message" in update:
-                    await handle_message(update["message"])
-                if "callback_query" in update:
-                    await handle_callback(update["callback_query"])
+                logger.info(f"Processing update: {json.dumps(update, ensure_ascii=False)[:200]}")
                 
-                # Обновляем offset
-                if update.get("update_id", 0) >= offset:
-                    offset = update["update_id"] + 1
+                if "message_created" in update:
+                    await handle_message(update["message_created"])
+                if "message_callback" in update:
+                    await handle_callback(update["message_callback"])
+                
+                # Обновляем marker
+                if "marker" in update:
+                    marker = update["marker"]
             
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
     except KeyboardInterrupt:
         logger.info("Бот остановлен")
     finally:
