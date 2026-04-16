@@ -62,7 +62,7 @@ async def api_request(method: str, endpoint: str, data: Dict = None, params: Dic
 
 
 async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
-    """Отправка сообщения пользователю (через /messages)"""
+    """Отправка сообщения пользователю"""
     payload = {"text": text}
     if keyboard:
         payload["attachments"] = [{
@@ -111,7 +111,7 @@ async def publish_to_channel(post_data: Dict) -> bool:
 async def get_updates(marker: int = None, timeout: int = 30) -> list:
     """
     Long polling для получения обновлений.
-    Использует GET /updates согласно документации [citation:2]
+    Использует GET /updates согласно документации [citation:5]
     """
     params = {"timeout": timeout}
     if marker:
@@ -122,13 +122,11 @@ async def get_updates(marker: int = None, timeout: int = 30) -> list:
     if "error" in result:
         return []
     
-    # API возвращает { "updates": [...], "marker": ... }
     return result.get("updates", [])
 
 
 async def handle_message(message: Dict):
     """Обработка входящего сообщения"""
-    # Структура из документации MAX [citation:1]
     chat_id = message.get("recipient", {}).get("chat_id")
     if not chat_id:
         chat_id = message.get("from", {}).get("id")
@@ -142,7 +140,6 @@ async def handle_message(message: Dict):
     
     logger.info(f"Сообщение от {chat_id}: {text[:100] if text else '[без текста]'}")
     
-    # Команда /start
     if text == "/start":
         keyboard = {
             "inline_keyboard": [
@@ -157,13 +154,11 @@ async def handle_message(message: Dict):
         )
         return
     
-    # Команда /post
     if text == "/post":
         user_sessions[chat_id] = {"step": "waiting_text"}
         await send_message(chat_id, "📝 Отправьте текст поста")
         return
     
-    # Обработка сессии создания поста
     if chat_id in user_sessions:
         session_data = user_sessions[chat_id]
         step = session_data.get("step")
@@ -192,7 +187,6 @@ async def handle_message(message: Dict):
 
 async def handle_callback(callback: Dict):
     """Обработка нажатий на кнопки"""
-    # Структура из документации MAX [citation:1]
     data = callback.get("payload", {}).get("data", "")
     user_id = callback.get("user", {}).get("id")
     
@@ -220,7 +214,7 @@ async def main():
     session = aiohttp.ClientSession()
     marker = None
     
-    logger.info("✅ Бот запущен в режиме Long Polling [citation:2]")
+    logger.info("✅ Бот запущен в режиме Long Polling [citation:5]")
     logger.info("📨 Ожидание сообщений...")
     
     try:
@@ -230,13 +224,11 @@ async def main():
             for update in updates:
                 logger.info(f"Обработка update: {json.dumps(update, ensure_ascii=False)[:200]}")
                 
-                # Типы обновлений согласно документации [citation:1]
                 if "message_created" in update:
                     await handle_message(update["message_created"])
                 if "message_callback" in update:
                     await handle_callback(update["message_callback"])
                 
-                # Обновляем marker для следующего запроса [citation:2]
                 if "marker" in update:
                     marker = update["marker"]
             
