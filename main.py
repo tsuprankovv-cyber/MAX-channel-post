@@ -7,7 +7,6 @@ from typing import Dict, Optional
 from aiohttp import web, ClientSession, ClientTimeout
 from dotenv import load_dotenv
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -115,7 +114,7 @@ async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
     return "error" not in result
 
 
-async def publish_to_channel(post_data: Dict) -> bool:
+async def publish_to_channel(post_ Dict) -> bool:
     """Публикация поста в канал"""
     try:
         buttons = []
