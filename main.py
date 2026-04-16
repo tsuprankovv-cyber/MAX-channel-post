@@ -40,7 +40,6 @@ def build_auth_params():
     elif MAX_AUTH_TYPE == 'query':
         params["access_token"] = BOT_TOKEN
     else:
-        # 🔥 По умолчанию: сырой токен в заголовке Authorization
         headers["Authorization"] = BOT_TOKEN
     return headers, params
 
@@ -64,19 +63,16 @@ async def api_request(method: str, endpoint: str,  Dict = None, params: Dict = N
             ) as response:
                 text = await response.text()
                 
-                # Обработка 429 - Rate Limit
                 if response.status == 429:
                     wait = min(int(response.headers.get('Retry-After', 30)), 120)
                     logger.warning(f"⏳ Rate limit. Ждём {wait}с...")
                     await asyncio.sleep(wait)
                     continue
                 
-                # Обработка 401 - Авторизация
                 if response.status == 401:
                     logger.error(f"❌ AUTH FAILED: {text[:200]}")
                     return {"error": "auth_failed"}
                 
-                # Успешный ответ
                 if response.status == 200:
                     try:
                         result = json.loads(text) if text.strip() else {}
@@ -91,7 +87,6 @@ async def api_request(method: str, endpoint: str,  Dict = None, params: Dict = N
         except Exception as e:
             logger.error(f"Request error (attempt {attempt+1}): {e}")
         
-        # Пауза перед повтором
         if attempt < max_retries - 1:
             await asyncio.sleep(2 ** attempt)
     
@@ -100,7 +95,6 @@ async def api_request(method: str, endpoint: str,  Dict = None, params: Dict = N
 
 async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
     """Отправка сообщения пользователю"""
-    # 🔧 Формируем кнопки в формате MAX API: поле buttons (всегда массив!)
     buttons = []
     if keyboard and "inline_keyboard" in keyboard:
         for row in keyboard["inline_keyboard"]:
@@ -114,17 +108,16 @@ async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
     
     payload = {
         "text": text,
-        "buttons": buttons  # 🔥 Всегда отправляем массив, даже пустой
+        "buttons": buttons
     }
     
     result = await api_request("POST", f"/messages?user_id={chat_id}", data=payload)
     return "error" not in result
 
 
-async def publish_to_channel(post_ Dict) -> bool:
+async def publish_to_channel(post_data: Dict) -> bool:
     """Публикация поста в канал"""
     try:
-        # 🔧 Формируем кнопки в формате MAX API
         buttons = []
         if post_data.get('button_title') and post_data.get('button_url'):
             buttons.append({
@@ -134,7 +127,7 @@ async def publish_to_channel(post_ Dict) -> bool:
         
         payload = {
             "text": post_data.get('text', ''),
-            "buttons": buttons  # 🔥 Всегда массив, не null
+            "buttons": buttons
         }
         
         result = await api_request("POST", f"/channels/{CHANNEL_ID}/messages", data=payload)
@@ -214,7 +207,7 @@ async def handle_callback(callback: Dict):
         await send_message(user_id, "📖 **Помощь**\n/post — создать пост")
 
 
-# 🔥 ФОНОВАЯ ЗАДАЧА БОТА (Long Polling)
+# 🔥 ФОНОВАЯ ЗАДАЧА БОТА
 async def bot_polling():
     logger.info("🤖 Bot polling started")
     marker = None
@@ -231,7 +224,6 @@ async def bot_polling():
                     marker = update.get("marker") or update.get("update_id") or marker
                     if isinstance(marker, int):
                         marker += 1
-            # 🔥 Пауза между запросами — защита от 429
             await asyncio.sleep(5)
         except asyncio.CancelledError:
             logger.info("🛑 Bot polling cancelled")
@@ -241,7 +233,7 @@ async def bot_polling():
             await asyncio.sleep(10)
 
 
-# 🔥 WEB-СЕРВЕР: эндпоинты для Render
+# 🔥 WEB-СЕРВЕР
 async def health_check(request):
     return web.json_response({"status": "ok"})
 
@@ -265,7 +257,6 @@ async def on_cleanup(app):
     if api_session:
         await api_session.close()
 
-# Создаём приложение
 app = web.Application()
 app.add_routes([
     web.get('/', root_handler),
@@ -274,7 +265,6 @@ app.add_routes([
 app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
 
-# 🔥 Точка входа
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 10000))
     logger.info(f"🌐 Server starting on port {port}")
