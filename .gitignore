@@ -1,18 +1,7 @@
-# Python
 __pycache__/
-*.py[cod]
-*.so
-.Python
+*.pyc
 .env
 venv/
-env/
-
-# IDE
-.vscode/
 .idea/
-
-# Logs
+.vscode/
 *.log
-
-# Local config
-config.local.py
