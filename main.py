@@ -42,7 +42,7 @@ def build_auth_params():
     return headers, params
 
 
-async def api_request(method: str, endpoint: str, data: Dict = None, params: Dict = None, max_retries: int = 3):
+async def api_request(method: str, endpoint: str,  Dict = None, params: Dict = None, max_retries: int = 3):
     """Универсальный запрос к API MAX"""
     headers, auth_params = build_auth_params()
     all_params = {**(params or {}), **auth_params}
@@ -109,7 +109,7 @@ async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
     return "error" not in result
 
 
-async def publish_to_channel(post_data: Dict) -> bool:
+async def publish_to_channel(post_ Dict) -> bool:
     """Публикация поста в канал"""
     try:
         buttons = []
@@ -124,17 +124,25 @@ async def publish_to_channel(post_data: Dict) -> bool:
         return False
 
 
-# 🔥 ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ (вебхук)
 async def webhook_handler(request):
     """Принимает обновления от MAX API"""
     try:
         update = await request.json()
-        logger.info(f"📥 Webhook received: {json.dumps(update, ensure_ascii=False)[:200]}")
+        logger.info(f"📥 Webhook: {json.dumps(update, ensure_ascii=False)[:300]}")
         
-        # Извлекаем сообщение
-        message = update.get("message") or update.get("body") or update
-        chat_id = message.get("from", {}).get("id") or message.get("user_id") or message.get("chat_id")
-        text = message.get("text") or message.get("body", {}).get("text") if isinstance(message.get("body"), dict) else message.get("body")
+        # 🔧 Извлекаем сообщение (пробуем разные форматы)
+        message = update.get("message") or update.get("body") or update.get("data") or update
+        if isinstance(message, dict):
+            chat_id = message.get("from", {}).get("id") or message.get("user_id") or message.get("chat_id")
+            # 🔧 Извлекаем текст из разных возможных мест
+            text = message.get("text")
+            if not text and isinstance(message.get("body"), dict):
+                text = message["body"].get("text")
+            if not text:
+                text = message.get("body")  # если текст сразу в body
+        else:
+            chat_id = None
+            text = None
         
         if not chat_id:
             logger.warning("❌ Не удалось определить chat_id")
@@ -153,15 +161,23 @@ async def webhook_handler(request):
         
         elif chat_id in user_sessions:
             sd = user_sessions[chat_id]
-            if sd.get("step") == "waiting_text":
+            step = sd.get("step")
+            
+            if step == "waiting_text":
                 sd["text"] = text
                 sd["step"] = "waiting_button"
                 await send_message(chat_id, "🔘 Кнопка: `Текст | ссылка`\nИли `пропустить`")
-            elif sd.get("step") == "waiting_button":
-                if text.lower() not in ("пропустить", "skip", "-") and "|" in text:
-                    parts = text.split("|", 1)
-                    sd["button_title"] = parts[0].strip()
-                    sd["button_url"] = parts[1].strip()
+            
+            elif step == "waiting_button":
+                if text and text.lower() not in ("пропустить", "skip", "-"):
+                    if "|" in text:
+                        parts = text.split("|", 1)
+                        sd["button_title"] = parts[0].strip()
+                        sd["button_url"] = parts[1].strip()
+                    else:
+                        await send_message(chat_id, "❌ Формат: `Текст | ссылка`")
+                        return web.json_response({"ok": True})
+                
                 ok = await publish_to_channel(sd)
                 await send_message(chat_id, "✅ Опубликовано!" if ok else "❌ Ошибка")
                 del user_sessions[chat_id]
@@ -184,8 +200,6 @@ async def on_startup(app):
     global api_session
     logger.info("🚀 Starting MAX Channel Poster (Webhook mode)")
     api_session = ClientSession()
-    # 🔧 Здесь можно добавить регистрацию вебхука, если API требует
-    # await register_webhook()
 
 async def on_cleanup(app):
     logger.info("🔚 Shutting down...")
@@ -197,13 +211,13 @@ app = web.Application()
 app.add_routes([
     web.get('/', root_handler),
     web.get('/health', health_check),
-    web.post('/webhook', webhook_handler),  # 🔥 Сюда MAX будет слать сообщения
+    web.post('/webhook', webhook_handler),
 ])
 app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 10000))
-    logger.info(f"🌐 Server starting on port {port}")
-    logger.info(f"🔗 Webhook URL: https://max-channel-post.onrender.com/webhook")
+    logger.info(f"🌐 Server on port {port}")
+    logger.info(f"🔗 Webhook: https://max-channel-post.onrender.com/webhook")
     web.run_app(app, host='0.0.0.0', port=port, access_log=None)
