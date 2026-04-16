@@ -7,6 +7,7 @@ from typing import Dict, Optional
 from aiohttp import web, ClientSession, ClientTimeout
 from dotenv import load_dotenv
 
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -19,7 +20,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv('MAX_BOT_TOKEN')
 CHANNEL_ID = os.getenv('MAX_CHANNEL_ID')
 BASE_API_URL = os.getenv('MAX_API_URL', 'https://platform-api.max.ru')
-MAX_AUTH_TYPE = os.getenv('MAX_AUTH_TYPE', 'query').lower()
+MAX_AUTH_TYPE = os.getenv('MAX_AUTH_TYPE', 'none').lower()
 
 user_sessions: Dict[int, Dict] = {}
 api_session: Optional[ClientSession] = None
@@ -39,11 +40,12 @@ def build_auth_params():
     elif MAX_AUTH_TYPE == 'query':
         params["access_token"] = BOT_TOKEN
     else:
+        # 🔥 По умолчанию: сырой токен в заголовке Authorization
         headers["Authorization"] = BOT_TOKEN
     return headers, params
 
 
-async def api_request(method: str, endpoint: str, data: Dict = None, params: Dict = None, max_retries: int = 3):
+async def api_request(method: str, endpoint: str,  Dict = None, params: Dict = None, max_retries: int = 3):
     """Универсальный запрос к API MAX"""
     headers, auth_params = build_auth_params()
     all_params = {**(params or {}), **auth_params}
@@ -98,27 +100,42 @@ async def api_request(method: str, endpoint: str, data: Dict = None, params: Dic
 
 async def send_message(chat_id: int, text: str, keyboard: Dict = None) -> bool:
     """Отправка сообщения пользователю"""
-    payload = {"text": text}
-    if keyboard:
-        payload["attachments"] = [{"type": "inline_keyboard", "payload": keyboard}]
+    # 🔧 Формируем кнопки в формате MAX API: поле buttons (всегда массив!)
+    buttons = []
+    if keyboard and "inline_keyboard" in keyboard:
+        for row in keyboard["inline_keyboard"]:
+            for btn in row:
+                btn_data = {"text": btn.get("text", "")}
+                if btn.get("url"):
+                    btn_data["url"] = btn["url"]
+                if btn.get("callback_data"):
+                    btn_data["callback_data"] = btn["callback_data"]
+                buttons.append(btn_data)
+    
+    payload = {
+        "text": text,
+        "buttons": buttons  # 🔥 Всегда отправляем массив, даже пустой
+    }
+    
     result = await api_request("POST", f"/messages?user_id={chat_id}", data=payload)
     return "error" not in result
 
 
-async def publish_to_channel(post_data: Dict) -> bool:
+async def publish_to_channel(post_ Dict) -> bool:
     """Публикация поста в канал"""
     try:
-        keyboard = None
+        # 🔧 Формируем кнопки в формате MAX API
+        buttons = []
         if post_data.get('button_title') and post_data.get('button_url'):
-            keyboard = {
-                "inline_keyboard": [[{
-                    "text": post_data['button_title'],
-                    "url": post_data['button_url']
-                }]]
-            }
-        payload = {"text": post_data.get('text', '')}
-        if keyboard:
-            payload["attachments"] = [{"type": "inline_keyboard", "payload": keyboard}]
+            buttons.append({
+                "text": post_data['button_title'],
+                "url": post_data['button_url']
+            })
+        
+        payload = {
+            "text": post_data.get('text', ''),
+            "buttons": buttons  # 🔥 Всегда массив, не null
+        }
         
         result = await api_request("POST", f"/channels/{CHANNEL_ID}/messages", data=payload)
         return "error" not in result
