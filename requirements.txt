@@ -1,2 +1,2 @@
-maxbot>=0.1.8
+maxapi[webhook]>=1.0.0
 python-dotenv
