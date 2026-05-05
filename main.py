@@ -85,12 +85,19 @@ async def send_message(chat_id, text, keyboard=None):
     payload = {"text": text, "buttons": buttons if buttons else []}
     endpoint = f"/chats/{chat_id}/messages"
     
+    logger.info(f"[SEND] → {endpoint} | text_len={len(text)} | buttons={len(buttons)}")
     result = await api_request("POST", endpoint, data=payload)
+    
+    if "error" in result:
+        logger.error(f"[SEND] ❌ Failed: {result}")
+    else:
+        logger.info(f"[SEND] ✅ Sent successfully")
+    
     return "error" not in result
 
 
 async def publish_to_channel(post_data):
-    """Публикация поста в канал — БЕЗ аннотаций типов!"""
+    """Публикация поста в канал"""
     try:
         buttons = []
         if post_data.get('button_title') and post_data.get('button_url'):
@@ -99,7 +106,14 @@ async def publish_to_channel(post_data):
         payload = {"text": post_data.get('text', ''), "buttons": buttons if buttons else []}
         endpoint = f"/chats/{CHANNEL_ID}/messages"
         
+        logger.info(f"[PUBLISH] → {endpoint} | text_len={len(payload['text'])}")
         result = await api_request("POST", endpoint, data=payload)
+        
+        if "error" in result:
+            logger.error(f"[PUBLISH] ❌ Failed: {result}")
+        else:
+            logger.info(f"[PUBLISH] ✅ Published successfully")
+        
         return "error" not in result
     except Exception as e:
         logger.error(f"[PUBLISH] Error: {e}")
@@ -143,6 +157,7 @@ async def webhook_handler(request):
         body = await request.json()
         update_type = body.get('update_type', 'unknown')
         logger.info(f"[WEBHOOK] Type: {update_type}")
+        logger.info(f"[WEBHOOK] Full body preview: {json.dumps(body, ensure_ascii=False)[:500]}")
         
         if update_type == 'message_created' and (msg := body.get('message')):
             await handle_max_message(msg)
@@ -158,43 +173,85 @@ async def webhook_handler(request):
 
 
 async def handle_max_message(msg):
-    """Обработка сообщения от пользователя"""
-    # Логируем структуру для отладки
-    logger.info(f"[HANDLE] 📦 Message keys: {list(msg.keys())}")
+    """Обработка сообщения от пользователя — с ПОЛНЫМ логированием"""
     
-    # Пробуем ВСЕ возможные пути извлечения chat_id
+    # 🔥 Логируем ВСЮ структуру сообщения для отладки
+    logger.info("=" * 80)
+    logger.info(f"[HANDLE] 📦 FULL MESSAGE STRUCTURE:")
+    logger.info(json.dumps(msg, ensure_ascii=False, indent=2)[:2000])
+    logger.info(f"[HANDLE] Top-level keys: {list(msg.keys())}")
+    
+    # 🔥 Пробуем ВСЕ возможные пути извлечения chat_id
     chat_id = None
+    chat_id_source = None
     
-    # Путь 1: msg -> from -> id
-    if isinstance(msg.get('from'), dict):
-        chat_id = msg['from'].get('id')
+    # Путь 1: recipient.id (на основе логов!)
+    if isinstance(msg.get('recipient'), dict):
+        cid = msg['recipient'].get('id') or msg['recipient'].get('chat_id') or msg['recipient'].get('user_id')
+        if cid:
+            chat_id = cid
+            chat_id_source = 'recipient'
+            logger.info(f"[HANDLE] ✅ Found chat_id={chat_id} in recipient")
     
-    # Путь 2: msg -> body -> from -> id
+    # Путь 2: sender.id
+    if not chat_id and isinstance(msg.get('sender'), dict):
+        cid = msg['sender'].get('id') or msg['sender'].get('chat_id') or msg['sender'].get('user_id')
+        if cid:
+            chat_id = cid
+            chat_id_source = 'sender'
+            logger.info(f"[HANDLE] ✅ Found chat_id={chat_id} in sender")
+    
+    # Путь 3: from.id (на всякий случай)
+    if not chat_id and isinstance(msg.get('from'), dict):
+        cid = msg['from'].get('id')
+        if cid:
+            chat_id = cid
+            chat_id_source = 'from'
+            logger.info(f"[HANDLE] ✅ Found chat_id={chat_id} in from")
+    
+    # Путь 4: body.from.id
     if not chat_id and isinstance(msg.get('body'), dict):
-        body_from = msg['body'].get('from')
-        if isinstance(body_from, dict):
-            chat_id = body_from.get('id')
+        body = msg['body']
+        if isinstance(body.get('from'), dict):
+            cid = body['from'].get('id')
+            if cid:
+                chat_id = cid
+                chat_id_source = 'body.from'
+                logger.info(f"[HANDLE] ✅ Found chat_id={chat_id} in body.from")
     
-    # Путь 3: msg -> body -> user_id / chat_id
+    # Путь 5: body.user_id / body.chat_id
     if not chat_id and isinstance(msg.get('body'), dict):
-        chat_id = msg['body'].get('user_id') or msg['body'].get('chat_id')
+        cid = msg['body'].get('user_id') or msg['body'].get('chat_id')
+        if cid:
+            chat_id = cid
+            chat_id_source = 'body'
+            logger.info(f"[HANDLE] ✅ Found chat_id={chat_id} in body")
     
-    # Путь 4: msg -> user_id / chat_id напрямую
+    # Путь 6: напрямую в корне
     if not chat_id:
-        chat_id = msg.get('user_id') or msg.get('chat_id')
+        cid = msg.get('user_id') or msg.get('chat_id') or msg.get('id')
+        if cid:
+            chat_id = cid
+            chat_id_source = 'root'
+            logger.info(f"[HANDLE] ✅ Found chat_id={chat_id} in root")
     
-    # Извлекаем текст
+    # 🔥 Извлекаем текст
     body = msg.get('body', {}) if isinstance(msg.get('body'), dict) else {}
     text = body.get('text', '') or msg.get('text', '')
     
+    # 🔥 Если chat_id не найден — логируем детали и выходим
     if not chat_id:
-        logger.warning(f"[HANDLE] ❌ No chat_id found. Body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
+        logger.error(f"[HANDLE] ❌ CRITICAL: No chat_id found!")
+        logger.error(f"[HANDLE] recipient keys: {list(msg.get('recipient', {}).keys()) if isinstance(msg.get('recipient'), dict) else 'N/A'}")
+        logger.error(f"[HANDLE] sender keys: {list(msg.get('sender', {}).keys()) if isinstance(msg.get('sender'), dict) else 'N/A'}")
+        logger.error(f"[HANDLE] body keys: {list(body.keys()) if isinstance(body, dict) else 'N/A'}")
         return
     
-    logger.info(f"[HANDLE] 💬 From {chat_id}: {text[:100] if text else '[empty]'}")
+    logger.info(f"[HANDLE] 💬 From {chat_id} (via {chat_id_source}): '{text[:100] if text else '[empty]'}'")
     
-    # Обработка команд
+    # 🔥 Обработка команд
     if text == "/start":
+        logger.info(f"[HANDLE] 🎯 Processing /start for {chat_id}")
         kb = {"inline_keyboard": [
             [{"text": "➕ Новый пост", "callback_data": "new_post"}],
             [{"text": "ℹ️ Помощь", "callback_data": "help"}]
@@ -202,12 +259,14 @@ async def handle_max_message(msg):
         await send_message(chat_id, "👋 **MAX Channel Poster**\n\nНажми «Новый пост»", kb)
     
     elif text == "/post":
+        logger.info(f"[HANDLE] 🎯 Processing /post for {chat_id}")
         user_sessions[chat_id] = {"step": "waiting_text"}
         await send_message(chat_id, "📝 Отправь текст поста")
     
     elif chat_id in user_sessions:
         sd = user_sessions[chat_id]
         step = sd.get("step")
+        logger.info(f"[HANDLE] 🎯 Session step={step} for {chat_id}")
         
         if step == "waiting_text":
             sd["text"] = text
@@ -226,6 +285,8 @@ async def handle_max_message(msg):
             ok = await publish_to_channel(sd)
             await send_message(chat_id, "✅ Опубликовано!" if ok else "❌ Ошибка")
             del user_sessions[chat_id]
+    
+    logger.info("=" * 80)
 
 
 # ===================================================================
