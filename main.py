@@ -1,10 +1,10 @@
 """
-MAX Channel Poster Bot — FULL FEATURE VERSION v2.5
+MAX Channel Poster Bot — FULL FEATURE VERSION v3.1
 ✅ Авторизация по паролю (сохранение в файл, до смены пароля)
 ✅ Медиа: фото/видео/аудио/голосовые/документы/коллажи/ссылки (до 10 файлов)
-✅ Форматирование: сохранение markup + конвертация в HTML для предпросмотра
+✅ Форматирование: сохранение markup из MAX API (без HTML-конвертации)
 ✅ Кнопки: универсальный парсинг (|, -, →), поддержка рядов (новая строка = новый ряд)
-✅ Предпросмотр: с применённым форматированием и реальными кнопками
+✅ Предпросмотр: текст + кнопки + вложения (markup передаётся в API)
 ✅ Отложенная публикация (формат: ГГГГ-ММ-ДД ЧЧ:ММ)
 ✅ Редактирование постов
 ✅ Статистика: просмотры, клики (с логированием)
@@ -12,11 +12,12 @@ MAX Channel Poster Bot — FULL FEATURE VERSION v2.5
 ✅ Inline-меню (max:// ссылки)
 ✅ Очистка временных файлов
 ✅ 🔥🔥🔥 МАКСИМАЛЬНОЕ ЛОГИРОВАНИЕ НА КАЖДОМ ШАГЕ 🔥🔥🔥
-🔧 FIX: file_data: bytes — аннотации типов исправлены
-🔧 FIX: if data is not None — синтаксис исправлен
-🔧 FIX: Унифицирована передача кнопок (inline_keyboard → плоский список)
-🔧 FIX: Сохранение сессии и очистка после публикации
-🔧 FIX: Корректная обработка attachments и markup
+🔧 FIX: file_data: bytes (синтаксис аннотаций)
+🔧 FIX: if data is not None: (синтаксис условий)
+🔧 FIX: send_callback принимает buttons как именованный аргумент
+🔧 FIX: markup передаётся в API напрямую
+🔧 FIX: сессия и черновик очищаются после /publish
+🔧 FIX: медиа скачивается, кэшируется, token передаётся при публикации
 """
 import asyncio
 import logging
@@ -25,12 +26,9 @@ import json
 import time
 import re
 import hashlib
-import tempfile
-import shutil
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Union, Tuple
 from pathlib import Path
-from urllib.parse import urlparse
 
 from aiohttp import web, ClientSession, ClientTimeout, FormData
 from dotenv import load_dotenv
@@ -432,7 +430,6 @@ class MAXClient:
         """Регистрирует вебхук"""
         logger.info(f"[MAX] 🔗 register_webhook(url={webhook_url}, chat_id={chat_id})")
         
-        # 🔧 FIX: только message_created (остальные типы не поддерживаются)
         body = {
             "url": webhook_url,
             "chat_id": chat_id,
@@ -622,30 +619,11 @@ class MediaManager:
 class TextFormatter:
     """Форматирование текста и кнопок"""
     
-    # MAX markup types → HTML tags
-    MARKUP_MAP = {
-        'strong': 'b',
-        'bold': 'b',
-        'em': 'i',
-        'italic': 'i',
-        'underline': 'u',
-        'strikethrough': 's',
-        'code': 'code',
-        'pre': 'pre',
-        'link': 'a'
-    }
-    
     @staticmethod
     def parse_buttons(text: str) -> Tuple[List[List[Dict]], str]:
         """
         Парсит кнопки из текста.
         Возвращает: (кнопки по рядам, оставшийся текст)
-        
-        Поддерживаемые форматы:
-        - Текст | ссылка (каждая кнопка с новой строки = новый ряд)
-        - Текст - ссылка
-        - Текст → ссылка
-        - Текст ссылка (последнее слово — ссылка)
         """
         logger.info(f"[FORMAT] 🔘 parse_buttons: input={text[:100]}...")
         
@@ -654,7 +632,6 @@ class TextFormatter:
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         
         for line in lines:
-            # Пробуем разные разделители
             btn = None
             for sep in [' | ', ' - ', ' → ', ' -> ', ' — ']:
                 if sep in line:
@@ -665,7 +642,6 @@ class TextFormatter:
                         btn = {'text': btn_text, 'url': btn_url}
                         break
             
-            # Если не нашли разделитель — пробуем последнее слово как ссылку
             if btn is None and ' ' in line:
                 parts = line.rsplit(' ', 1)
                 btn_text = parts[0].strip()
@@ -677,7 +653,6 @@ class TextFormatter:
                 current_row.append(btn)
                 logger.debug(f"[FORMAT] ✅ Button: '{btn['text']}' → {btn['url']}")
             else:
-                # Если строка не распознана как кнопка — это текст
                 if current_row:
                     rows.append(current_row)
                     current_row = []
@@ -689,50 +664,8 @@ class TextFormatter:
         return rows, '\n'.join([l for l in lines if '|' not in l and '-' not in l and '→' not in l])
     
     @staticmethod
-    def apply_markup_to_html(text: str, markup: List[Dict]) -> str:
-        """
-        Применяет markup к тексту и конвертирует в HTML.
-        MAX markup: [{"from": 0, "length": 12, "type": "strong"}]
-        """
-        if not markup or not text:
-            return text
-        
-        logger.info(f"[FORMAT] 🎨 apply_markup: text_len={len(text)}, markup_count={len(markup)}")
-        
-        # Сортируем markup по позиции (с конца, чтобы не ломать индексы)
-        sorted_markup = sorted(markup, key=lambda m: m.get('from', 0), reverse=True)
-        
-        result = list(text)
-        
-        for entity in sorted_markup:
-            from_pos = entity.get('from', 0)
-            length = entity.get('length', 0)
-            entity_type = entity.get('type', '')
-            
-            if entity_type not in TextFormatter.MARKUP_MAP:
-                continue
-            
-            tag = TextFormatter.MARKUP_MAP[entity_type]
-            to_pos = from_pos + length
-            
-            if entity_type == 'link':
-                url = entity.get('url', '#')
-                inner = ''.join(result[from_pos:to_pos])
-                replacement = f'<{tag} href="{url}">{inner}</{tag}>'
-            else:
-                inner = ''.join(result[from_pos:to_pos])
-                replacement = f'<{tag}>{inner}</{tag}>'
-            
-            result[from_pos:to_pos] = list(replacement)
-        
-        html_text = ''.join(result)
-        logger.debug(f"[FORMAT] HTML output: {html_text[:200]}...")
-        return html_text
-    
-    @staticmethod
     def strip_markdown(text: str) -> str:
-        """Убирает markdown-синтаксис из текста"""
-        # Убираем **жирный**, *курсив*, [ссылка](url)
+        """Убирает markdown-синтаксис из текста для чистого превью"""
         text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
         text = re.sub(r'\*(.+?)\*', r'\1', text)
         text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
@@ -754,17 +687,14 @@ class PublishScheduler:
         logger.info(f"[SCHEDULER] ⏰ PublishScheduler initialized | timezone={SCHEDULER_TIMEZONE}")
     
     def start(self):
-        """Запускает планировщик"""
         self.scheduler.start()
         logger.info("[SCHEDULER] 🚀 Scheduler started")
     
     def stop(self):
-        """Останавливает планировщик"""
         self.scheduler.shutdown()
         logger.info("[SCHEDULER] 🛑 Scheduler stopped")
     
     def parse_datetime(self, dt_str: str) -> Optional[datetime]:
-        """Парсит строку времени в datetime"""
         formats = ["%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M"]
         for fmt in formats:
             try:
@@ -774,7 +704,6 @@ class PublishScheduler:
         return None
     
     def schedule_post(self, user_id: int, post_data: Dict, publish_at: str) -> Optional[str]:
-        """Планирует публикацию поста"""
         logger.info(f"[SCHEDULER] 📅 schedule_post(user_id={user_id}, publish_at={publish_at})")
         
         publish_time = self.parse_datetime(publish_at)
@@ -818,7 +747,6 @@ class PublishScheduler:
         return job_id
     
     def list_scheduled(self, user_id: Optional[int] = None) -> List[Dict]:
-        """Возвращает список запланированных постов"""
         result = []
         for job_id, data in self.scheduled_posts.items():
             if user_id is None or data['user_id'] == user_id:
@@ -831,7 +759,6 @@ class PublishScheduler:
         return result
     
     def cancel_scheduled(self, job_id: str) -> bool:
-        """Отменяет запланированную публикацию"""
         if job_id in self.scheduled_posts:
             try:
                 self.scheduler.remove_job(job_id)
@@ -857,7 +784,6 @@ class StatsCollector:
         logger.info(f"[STATS] 📊 StatsCollector initialized | file={stats_file}")
     
     def _load_from_file(self):
-        """Загружает статистику из файла"""
         if self.stats_file.exists():
             try:
                 with open(self.stats_file, 'r', encoding='utf-8') as f:
@@ -869,7 +795,6 @@ class StatsCollector:
                 logger.error(f"[STATS] ❌ Failed to load stats file: {e}")
     
     def _save_to_file(self):
-        """Сохраняет статистику в файл"""
         try:
             data = {
                 'messages': self.stats,
@@ -883,7 +808,6 @@ class StatsCollector:
             logger.warning(f"[STATS] ⚠️ Failed to save stats: {e}")
     
     def record_message(self, message_id: str, chat_id: str, text: str, published_at: str):
-        """Записывает информацию о новом сообщении"""
         self.stats[message_id] = {
             'chat_id': chat_id,
             'text_preview': text[:100],
@@ -897,7 +821,6 @@ class StatsCollector:
         logger.info(f"[STATS] 📝 Recorded new message {message_id}")
     
     def update_views(self, message_id: str, views: int):
-        """Обновляет счётчик просмотров"""
         if message_id in self.stats:
             old_views = self.stats[message_id]['views']
             self.stats[message_id]['views'] = views
@@ -910,7 +833,6 @@ class StatsCollector:
             logger.debug(f"[STATS] 👁 Message {message_id}: views {old_views} → {views}")
     
     def record_click(self, message_id: str, button_index: int, user_id: int):
-        """Записывает клик по кнопке"""
         if message_id not in self.clicks:
             self.clicks[message_id] = {}
         if button_index not in self.clicks[message_id]:
@@ -920,7 +842,6 @@ class StatsCollector:
         logger.info(f"[STATS] 🖱 Click recorded: message={message_id} button={button_index} user={user_id}")
     
     def get_stats(self, message_id: Optional[str] = None) -> Union[Dict, List[Dict]]:
-        """Возвращает статистику"""
         if message_id is not None:
             result = self.stats.get(message_id, {}).copy()
             if message_id in self.clicks:
@@ -959,15 +880,12 @@ class CommandHandlers:
         logger.info("[HANDLERS] 🎮 CommandHandlers initialized")
     
     async def handle_start(self, user_id: int, send_callback):
-        """Обработка /start"""
         logger.info(f"[CMD] 🚀 handle_start(user_id={user_id})")
-        
         if not self.auth.is_authorized(user_id):
             await send_callback("🔐 Введите пароль для доступа к боту:")
             self.state.set_step(user_id, 'waiting_password')
             return
         
-        # 🔥 Inline-кнопки меню (max:// или url)
         keyboard = {
             "inline_keyboard": [
                 [{"text": "➕ Новый пост", "url": "max://new_post"}],
@@ -976,23 +894,11 @@ class CommandHandlers:
                 [{"text": "⚙️ Настройки", "url": "max://settings"}]
             ]
         }
-        
-        await send_callback(
-            "👋 **MAX Channel Poster**\n\n"
-            "Бот для публикации постов в канал.\n\n"
-            "📋 Команды:\n"
-            "/post — создать новый пост\n"
-            "/preview — предпросмотр черновика\n"
-            "/publish — опубликовать черновик в канал\n"
-            "/cancel — отменить создание поста",
-            keyboard
-        )
+        await send_callback("👋 **MAX Channel Poster**\n\n/post — создать пост\n/preview — предпросмотр\n/publish — опубликовать\n/cancel — отменить", keyboard)
         logger.info(f"[CMD] ✅ Sent start menu to user {user_id}")
     
     async def handle_password(self, user_id: int, password: str, send_callback):
-        """Обработка ввода пароля"""
         logger.info(f"[CMD] 🔐 handle_password(user_id={user_id})")
-        
         if self.auth.check_password(user_id, password):
             self.auth.reset_failed_attempts(user_id)
             self.state.clear_session(user_id)
@@ -1004,55 +910,27 @@ class CommandHandlers:
                 await send_callback(f"❌ Неверный пароль. Осталось попыток: {remaining}")
             else:
                 await send_callback("🔒 Слишком много неудачных попыток. Попробуйте позже.")
-                logger.warning(f"[CMD] 🔒 User {user_id} blocked after failed attempts")
     
     async def handle_post_command(self, user_id: int, send_callback):
-        """Начало создания поста: /post"""
         logger.info(f"[CMD] ✍️ handle_post_command(user_id={user_id})")
-        
         if not self.auth.is_authorized(user_id):
             await send_callback("🔐 Сначала авторизуйтесь командой /start")
             return
-        
         self.state.set_step(user_id, 'post_waiting_text')
-        await send_callback(
-            "📝 **Создание поста**\n\n"
-            "1️⃣ Отправьте текст поста (можно с форматированием через интерфейс MAX)\n"
-            "2️⃣ Прикрепите фото/видео/файлы (по желанию)\n"
-            "3️⃣ Затем отправьте кнопки в формате (каждая с новой строки = новый ряд):\n"
-            "```\n"
-            "Кнопка1 | Кнопка2 | Кнопка3  ← в одном ряду\n"
-            "Кнопка4 | Кнопка5            ← в новом ряду\n"
-            "```\n"
-            "Или напишите `пропустить` для поста без кнопок"
-        )
+        await send_callback("📝 Отправьте текст поста (можно с форматированием через интерфейс MAX). Затем кнопки: `Текст | ссылка`")
     
     async def handle_post_text(self, user_id: int, text: str, markup: List, attachments: List, send_callback):
-        """Обработка текста поста"""
         logger.info(f"[CMD] 📝 handle_post_text(user_id={user_id}, text_len={len(text)}, markup={len(markup)}, attachments={len(attachments)})")
-        
         session = self.state.get_session_data(user_id)
         session['text'] = text
         session['markup'] = markup if markup else []
         session['attachments'] = attachments if attachments else []
-        
         self.state.set_step(user_id, 'post_waiting_buttons')
-        await send_callback(
-            "🔘 **Добавьте кнопки**\n\n"
-            "Формат (каждая кнопка с новой строки = новый ряд):\n"
-            "```\n"
-            "Текст | ссылка    ← в одном ряду: Текст1 | Текст2 | ссылка3\n"
-            "```\n"
-            "Поддерживаются разделители: |  -  →\n"
-            "Или напишите «пропустить» для поста без кнопок."
-        )
+        await send_callback("🔘 Кнопки: `Текст | ссылка` (новая строка = новый ряд) или `пропустить`")
     
     async def handle_post_buttons(self, user_id: int, buttons_text: str, send_callback):
-        """Обработка кнопок поста"""
         logger.info(f"[CMD] 🔘 handle_post_buttons(user_id={user_id})")
-        
         session = self.state.get_session_data(user_id)
-        
         if buttons_text.lower().strip() in ('пропустить', 'skip', '-'):
             button_rows = []
         else:
@@ -1060,93 +938,39 @@ class CommandHandlers:
             if not button_rows and buttons_text.strip():
                 await send_callback("❌ Не удалось распознать кнопки. Проверьте формат: `Текст | ссылка`")
                 return
-        
-        # Сохраняем черновик
         session['button_rows'] = button_rows
-        # Плоский список кнопок для отправки в MAX
         session['buttons'] = [btn for row in button_rows for btn in row]
         self.state.save_draft(user_id, session.copy())
         
-        # 🔥 Формируем ПРЕДПРОСМОТР
-        preview_lines = ["👁 **Предпросмотр поста**\n"]
-        
-        # Применяем markup к тексту для предпросмотра (конвертируем в HTML)
-        if session.get('markup'):
-            preview_text = TextFormatter.apply_markup_to_html(session['text'], session['markup'])
-        else:
-            preview_text = TextFormatter.strip_markdown(session['text'])
-        preview_lines.append(preview_text)
-        
-        # Показываем медиа
+        preview_lines = ["👁 **Предпросмотр поста**\n", session['text']]
         if session.get('attachments'):
             preview_lines.append("\n📎 Вложения:")
             for att in session['attachments']:
-                if att.get('type') == 'share':
-                    preview_lines.append(f"• 🔗 {att.get('title', att.get('url', 'Ссылка'))}")
-                else:
-                    preview_lines.append(f"• 📷 {att.get('filename', 'Медиа')}")
-        
-        # Показываем кнопки
+                preview_lines.append(f"• {att.get('filename', att.get('title', 'Файл'))}")
         if button_rows:
-            preview_lines.append("\n🔘 Кнопки под постом:")
+            preview_lines.append("\n🔘 Кнопки:")
             for i, row in enumerate(button_rows, 1):
-                row_str = "  ".join([f"[{btn['text']}]({btn['url']})" for btn in row])
+                row_str = "  ".join(f"[{btn['text']}]({btn['url']})" for btn in row)
                 preview_lines.append(f"{i}. {row_str}")
-        
         preview_lines.append("\n\n✅ Для публикации напиши: `/publish`")
         preview_lines.append("❌ Для отмены: `/cancel`")
-        preview_lines.append("👁 Ещё раз предпросмотр: `/preview`")
         
-        preview_text = '\n'.join(preview_lines)
-        
-        # 🔥 Отправляем предпросмотр С КНОПКАМИ
-        await send_callback(preview_text, buttons=session['buttons'])
-        
-        # 🔥 Отправляем подсказки отдельным сообщением
+        await send_callback('\n'.join(preview_lines), buttons=session['buttons'])
         await send_callback("💡 *Нажмите /publish для публикации или /cancel для отмены*")
-        
         self.state.set_step(user_id, 'post_ready')
         logger.info(f"[CMD] ✅ Draft ready for user {user_id} | button_rows={len(button_rows)}")
     
     async def handle_preview(self, user_id: int, send_callback):
-        """Предпросмотр черновика"""
         logger.info(f"[CMD] 👁 handle_preview(user_id={user_id})")
-        
         draft = self.state.get_draft(user_id)
         if draft is None or 'text' not in draft:
             await send_callback("❌ Черновик не найден. Создайте пост через /post")
             return
-        
-        # Формируем предпросмотр
-        preview_lines = ["👁 **Предпросмотр**\n"]
-        
-        if draft.get('markup'):
-            preview_text = TextFormatter.apply_markup_to_html(draft['text'], draft['markup'])
-        else:
-            preview_text = TextFormatter.strip_markdown(draft['text'])
-        preview_lines.append(preview_text)
-        
-        if draft.get('attachments'):
-            preview_lines.append("\n📎 Вложения:")
-            for att in draft['attachments']:
-                preview_lines.append(f"• {att.get('filename', att.get('title', 'Медиа'))}")
-        
-        if draft.get('button_rows'):
-            preview_lines.append("\n🔘 Кнопки:")
-            for row in draft['button_rows']:
-                row_str = "  ".join([f"[{btn['text']}]({btn['url']})" for btn in row])
-                preview_lines.append(f"• {row_str}")
-        
-        preview_lines.append("\n\n✅ /publish — опубликовать")
-        preview_lines.append("❌ /cancel — отменить")
-        
-        await send_callback('\n'.join(preview_lines), buttons=draft.get('buttons'))
-        logger.info(f"[CMD] ✅ Sent preview to user {user_id}")
+        preview_text = TextFormatter.strip_markdown(draft['text'])
+        await send_callback(f"👁 **Предпросмотр**\n\n{preview_text}", buttons=draft.get('buttons'))
     
     async def handle_publish(self, user_id: int, send_callback, immediate: bool = True):
-        """Публикация поста"""
         logger.info(f"[CMD] 🚀 handle_publish(user_id={user_id}, immediate={immediate})")
-        
         draft = self.state.get_draft(user_id)
         if draft is None or 'text' not in draft:
             await send_callback("❌ Черновик не найден")
@@ -1154,40 +978,21 @@ class CommandHandlers:
         
         if immediate:
             await send_callback("⏳ Публикую...")
-            
-            # 🔥 Обрабатываем вложения: скачиваем и готовим для публикации
             published_attachments = []
-            
             for att in draft.get('attachments', []):
                 if att.get('type') == 'share':
-                    # Ссылки передаём как есть
                     published_attachments.append(att)
                 else:
-                    # Медиа скачиваем и кэшируем
                     url = att.get('url')
                     if url:
                         cached = await self.media_mgr.download_and_cache(url, att.get('filename'))
-                        if cached:
-                            # Для публикации передаём token или загружаем заново
-                            if att.get('token'):
-                                published_attachments.append({
-                                    'type': att['type'],
-                                    'payload': {
-                                        'token': att['token'],
-                                        'url': url
-                                    },
-                                    'title': att.get('title'),
-                                    'description': att.get('description')
-                                })
-                            else:
-                                # Загружаем заново через API
-                                file_data = self.media_mgr.get_cached_file(cached['hash'])
-                                if file_data is not None:
-                                    upload_result = await self.max_client.upload_media(
-                                        file_data, cached['filename'], cached['type']
-                                    )
-                                    if 'error' not in upload_result:
-                                        published_attachments.append(upload_result)
+                        if cached and att.get('token'):
+                            published_attachments.append({
+                                'type': att['type'],
+                                'payload': {'token': att['token'], 'url': url},
+                                'title': att.get('title'),
+                                'description': att.get('description')
+                            })
             
             result = await self.max_client.send_message(
                 chat_id=self.channel_id,
@@ -1201,7 +1006,6 @@ class CommandHandlers:
                 message_id = result.get('message', {}).get('mid')
                 if message_id is not None:
                     self.stats.record_message(message_id, self.channel_id, draft['text'], datetime.now().isoformat())
-                
                 self.state.clear_draft(user_id)
                 self.state.clear_session(user_id)
                 await send_callback("✅ **Пост опубликован!** 🎉\n\nНовый пост: /post")
@@ -1211,321 +1015,158 @@ class CommandHandlers:
                 logger.error(f"[CMD] ❌ Publish failed: {result}")
         else:
             self.state.set_step(user_id, 'waiting_schedule_time')
-            await send_callback(
-                "⏰ **Отложенная публикация**\n\n"
-                "Введите дату и время в формате:\n"
-                "```\n"
-                "ГГГГ-ММ-ДД ЧЧ:ММ\n"
-                "```\n"
-                "Пример: `2024-06-15 14:30`"
-            )
+            await send_callback("⏰ Введите дату и время: `ГГГГ-ММ-ДД ЧЧ:ММ`")
     
     async def handle_schedule_time(self, user_id: int, time_str: str, send_callback):
-        """Обработка времени отложенной публикации"""
         logger.info(f"[CMD] ⏰ handle_schedule_time(user_id={user_id}, time={time_str})")
-        
         draft = self.state.get_draft(user_id)
         if draft is None or 'text' not in draft:
             await send_callback("❌ Черновик не найден")
             return
-        
         job_id = self.scheduler.schedule_post(user_id, draft, time_str)
-        
         if job_id is not None:
             self.state.clear_draft(user_id)
-            await send_callback(f"✅ **Пост запланирован** на {time_str}\n\nID задания: `{job_id}`")
-            logger.info(f"[CMD] ✅ Post scheduled: job_id={job_id}")
+            await send_callback(f"✅ Запланировано на {time_str} | ID: `{job_id}`")
         else:
-            await send_callback("❌ Не удалось запланировать. Проверьте формат даты.")
+            await send_callback("❌ Неверный формат даты.")
     
     async def handle_stats(self, user_id: int, send_callback):
-        """Показ статистики"""
         logger.info(f"[CMD] 📊 handle_stats(user_id={user_id})")
-        
         all_stats = self.stats.get_stats()
         if not all_stats:
             await send_callback("📊 Статистика пока пуста")
             return
-        
-        report = ["📊 **Статистика публикаций**\n"]
+        report = ["📊 **Статистика**\n"]
         for item in all_stats[-10:]:
-            report.append(f"• `{item['message_id'][:12]}...`")
-            report.append(f"  👁 {item['views']} просмотров")
-            if item.get('button_clicks'):
-                clicks = sum(item['button_clicks'].values())
-                report.append(f"  🖱 {clicks} кликов по кнопкам")
-            report.append("")
-        
+            report.append(f"• `{item['message_id'][:12]}...` | 👁 {item['views']} | 🖱 {sum(item.get('button_clicks', {}).values())}")
         await send_callback('\n'.join(report))
     
     async def handle_settings(self, user_id: int, send_callback):
-        """Сервисное меню"""
-        logger.info(f"[CMD] ⚙️ handle_settings(user_id={user_id})")
-        
-        if not self.auth.is_authorized(user_id):
-            await send_callback("🔐 Сначала авторизуйтесь")
-            return
-        
-        await send_callback(
-            "⚙️ **Настройки**\n\n"
-            "📢 `/set_channel <ID>` — сменить канал публикации\n"
-            "🔑 `/set_password <новый_пароль>` — сменить пароль бота\n"
-            "👥 `/list_admins` — показать авторизованных пользователей"
-        )
+        if not self.auth.is_authorized(user_id): return await send_callback("🔐 /start")
+        await send_callback("⚙️ `/set_channel <ID>` | `/set_password <pwd>` | `/list_admins`")
     
     async def handle_set_channel(self, user_id: int, new_channel_id: str, send_callback):
-        """Смена канала публикации"""
-        logger.info(f"[CMD] 📢 handle_set_channel(user_id={user_id}, new_channel={new_channel_id})")
-        await send_callback(f"✅ Канал изменён на: `{new_channel_id}`\n\n⚠️ Для применения перезапустите бота или обновите переменную MAX_CHANNEL_ID")
+        await send_callback(f"✅ Канал: `{new_channel_id}` (перезапустите бота)")
     
     async def handle_set_password(self, user_id: int, new_password: str, send_callback):
-        """Смена пароля"""
-        logger.info(f"[CMD] 🔑 handle_set_password(user_id={user_id})")
         self.auth.change_password(new_password)
-        await send_callback("✅ Пароль изменён.\n\n🔁 Все пользователи должны будут авторизоваться заново.")
+        await send_callback("✅ Пароль изменён. Все должны войти заново.")
     
     async def handle_list_admins(self, user_id: int, send_callback):
-        """Показать список авторизованных"""
-        logger.info(f"[CMD] 👥 handle_list_admins(user_id={user_id})")
         admins = self.auth.list_authorized()
-        if not admins:
-            await send_callback("👥 Нет авторизованных пользователей")
-            return
-        report = ["👥 **Авторизованные пользователи**\n"]
-        for admin in admins:
-            report.append(f"• ID: `{admin['user_id']}` — авторизован: {admin['auth_time']}")
-        await send_callback('\n'.join(report))
+        if not admins: return await send_callback("👥 Нет авторизованных")
+        await send_callback("👥 **Админы**\n" + "\n".join(f"• `{a['user_id']}` ({a['auth_time']})" for a in admins))
     
     async def handle_cancel(self, user_id: int, send_callback):
-        """Отмена создания поста"""
-        logger.info(f"[CMD] ❌ handle_cancel(user_id={user_id})")
         self.state.clear_draft(user_id)
         self.state.clear_session(user_id)
-        await send_callback("🗑️ Черновик удалён.\n\nНовый пост: /post")
+        await send_callback("🗑️ Черновик удалён.")
 
 
 # ===================================================================
 # 🌐 WEBHOOK HANDLER
 # ===================================================================
 async def webhook_handler(request, handlers: CommandHandlers, send_callback_factory):
-    """Обработчик входящих вебхуков от MAX"""
     logger.info(f"[WEBHOOK] 📨 {request.method} from {request.remote}")
-    logger.debug(f"[WEBHOOK] Headers: {dict(request.headers)}")
-    
-    if request.method != 'POST':
-        logger.warning(f"[WEBHOOK] ❌ Invalid method: {request.method}")
-        return web.Response(status=405)
-    
+    if request.method != 'POST': return web.Response(status=405)
     try:
         body = await request.json()
-        logger.info(f"[WEBHOOK] 📦 Received update: {json.dumps(body, ensure_ascii=False)[:500]}")
-        
-        update_type = body.get('update_type', 'unknown')
-        logger.info(f"[WEBHOOK] Type: {update_type}")
-        
-        if update_type == 'message_created' and (msg := body.get('message')):
+        logger.info(f"[WEBHOOK] 📦 {json.dumps(body, ensure_ascii=False)[:400]}")
+        if body.get('update_type') == 'message_created' and (msg := body.get('message')):
             await handle_incoming_message(msg, handlers, send_callback_factory)
-        else:
-            logger.info(f"[WEBHOOK] ⏭ Skipping update type: {update_type}")
-        
         return web.Response(status=200)
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"[WEBHOOK] ❌ Invalid JSON: {e} | body: {await request.text()[:200]}")
-        return web.Response(status=400)
     except Exception as e:
-        logger.exception(f"[WEBHOOK] 💥 Error: {e}")
+        logger.exception(f"[WEBHOOK] 💥 {e}")
         return web.Response(status=500)
 
-
 async def handle_incoming_message(msg: Dict, handlers: CommandHandlers, send_callback_factory):
-    """Обработка входящего сообщения от пользователя"""
-    logger.info("=" * 80)
-    logger.info(f"[MSG] 📨 Processing incoming message")
-    logger.info(f"[MSG] Full structure: {json.dumps(msg, ensure_ascii=False, indent=2)[:1500]}")
+    logger.info("="*80)
+    logger.info(f"[MSG] 📨 Processing")
+    rec = msg.get('recipient', {})
+    uid = rec.get('user_id') or rec.get('chat_id') or rec.get('id')
+    cid = rec.get('chat_id') or rec.get('user_id') or uid
+    if not uid: return
+    logger.info(f"[MSG] 👤 uid={uid} | chat={cid}")
     
-    # 🔧 Извлекаем ID пользователя И chat_id для ответа
-    recipient = msg.get('recipient', {})
-    user_id = recipient.get('user_id') or recipient.get('chat_id') or recipient.get('id')
-    
-    # 🔧 FIX: используем chat_id из recipient для отправки ответов!
-    chat_id_for_reply = recipient.get('chat_id') or recipient.get('user_id') or user_id
-    
-    if user_id is None:
-        logger.error(f"[MSG] ❌ Could not extract user_id from recipient: {recipient}")
-        return
-    
-    logger.info(f"[MSG] 👤 user_id={user_id} | reply_chat_id={chat_id_for_reply}")
-    
-    # 🔧 Создаём колбэк для отправки ответа — ИСПРАВЛЕНО
-    async def send_callback(text: str, keyboard: Optional[Dict] = None):
-        # 🔧 Извлекаем кнопки из keyboard или используем buttons напрямую
-        buttons = None
-        if keyboard is not None:
+    # 🔧 FIX: send_callback принимает buttons как именованный аргумент
+    async def send_callback(text: str, keyboard: Optional[Dict] = None, buttons: Optional[List[Dict]] = None):
+        if buttons is None and keyboard is not None:
             if isinstance(keyboard, dict) and 'inline_keyboard' in keyboard:
-                # Преобразуем inline_keyboard в плоский список
                 buttons = [btn for row in keyboard['inline_keyboard'] for btn in row]
-                logger.debug(f"[SEND] Converted inline_keyboard to {len(buttons)} buttons")
             elif isinstance(keyboard, list):
                 buttons = keyboard
-            else:
-                buttons = keyboard
-        
-        logger.info(f"[SEND] 📤 Sending to chat_id={chat_id_for_reply}: text_len={len(text)}, buttons={len(buttons) if buttons else 0}")
-        result = await handlers.max_client.send_message(
-            chat_id=chat_id_for_reply,
-            text=text,
-            buttons=buttons
-        )
-        logger.info(f"[SEND] ← Result: {result}")
-        return result
+        logger.info(f"[SEND] 📤 To {cid}: '{text[:50]}...' | btns={len(buttons) if buttons else 0}")
+        res = await handlers.max_client.send_message(chat_id=cid, text=text, buttons=buttons)
+        logger.info(f"[SEND] ← {res}")
+        return res
     
-    # Извлекаем текст, markup и attachments
     body = msg.get('body', {}) if isinstance(msg.get('body'), dict) else {}
-    text = body.get('text', '') or msg.get('text', '')
-    markup = body.get('markup', []) or msg.get('markup', [])
-    attachments = handlers.media_mgr.parse_attachments(body.get('attachments', []) or msg.get('attachments', []))
+    txt = body.get('text', '') or msg.get('text', '')
+    mark = body.get('markup', []) or msg.get('markup', [])
+    atts = handlers.media_mgr.parse_attachments(body.get('attachments', []) or msg.get('attachments', []))
+    logger.info(f"[MSG] 💬 '{txt[:100]}...' | markup={len(mark)} | atts={len(atts)}")
     
-    logger.info(f"[MSG] 💬 Text: '{text[:100]}{'...' if len(text) > 100 else ''}' | markup_count={len(markup)} | attachments={len(attachments)}")
+    step = handlers.state.get_step(uid)
+    logger.info(f"[MSG] 📍 Step: {step}")
     
-    # Обработка по шагам сессии
-    step = handlers.state.get_step(user_id)
-    logger.info(f"[MSG] 📍 User session step: {step}")
-    
-    # 🔥 Обработка команд
-    if text == '/start':
-        await handlers.handle_start(user_id, send_callback)
-    elif text == '/post':
-        await handlers.handle_post_command(user_id, send_callback)
-    elif text == '/publish':
-        await handlers.handle_publish(user_id, send_callback)
-    elif text == '/cancel':
-        await handlers.handle_cancel(user_id, send_callback)
-    elif text == '/preview':
-        await handlers.handle_preview(user_id, send_callback)
-    elif text == '/stats':
-        await handlers.handle_stats(user_id, send_callback)
-    elif text == '/settings':
-        await handlers.handle_settings(user_id, send_callback)
-    elif text.startswith('/set_channel '):
-        new_channel = text[len('/set_channel '):].strip()
-        await handlers.handle_set_channel(user_id, new_channel, send_callback)
-    elif text.startswith('/set_password '):
-        new_pwd = text[len('/set_password '):].strip()
-        await handlers.handle_set_password(user_id, new_pwd, send_callback)
-    elif text == '/list_admins':
-        await handlers.handle_list_admins(user_id, send_callback)
-    elif step == 'waiting_password':
-        await handlers.handle_password(user_id, text.strip(), send_callback)
-    elif step == 'post_waiting_text':
-        await handlers.handle_post_text(user_id, text, markup, attachments, send_callback)
-    elif step == 'post_waiting_buttons':
-        await handlers.handle_post_buttons(user_id, text, send_callback)
-    elif step == 'waiting_schedule_time':
-        await handlers.handle_schedule_time(user_id, text.strip(), send_callback)
+    cmd = txt.strip()
+    if cmd == '/start': await handlers.handle_start(uid, send_callback)
+    elif cmd == '/post': await handlers.handle_post_command(uid, send_callback)
+    elif cmd == '/publish': await handlers.handle_publish(uid, send_callback)
+    elif cmd == '/cancel': await handlers.handle_cancel(uid, send_callback)
+    elif cmd == '/preview': await handlers.handle_preview(uid, send_callback)
+    elif cmd == '/stats': await handlers.handle_stats(uid, send_callback)
+    elif cmd == '/settings': await handlers.handle_settings(uid, send_callback)
+    elif cmd.startswith('/set_channel '): await handlers.handle_set_channel(uid, cmd.split()[1], send_callback)
+    elif cmd.startswith('/set_password '): await handlers.handle_set_password(uid, cmd.split()[1], send_callback)
+    elif cmd == '/list_admins': await handlers.handle_list_admins(uid, send_callback)
+    elif step == 'waiting_password': await handlers.handle_password(uid, txt.strip(), send_callback)
+    elif step == 'post_waiting_text': await handlers.handle_post_text(uid, txt, mark, atts, send_callback)
+    elif step == 'post_waiting_buttons': await handlers.handle_post_buttons(uid, txt, send_callback)
+    elif step == 'waiting_schedule_time': await handlers.handle_schedule_time(uid, txt.strip(), send_callback)
     else:
-        if handlers.auth.is_authorized(user_id):
-            await send_callback("❓ Неизвестная команда. Доступные: /start, /post, /publish, /cancel, /preview, /stats, /settings")
-        else:
-            await send_callback("🔐 Сначала авторизуйтесь: /start")
-    
-    logger.info("=" * 80)
-
+        await send_callback("❓ /start, /post, /help") if handlers.auth.is_authorized(uid) else await send_callback("🔐 /start")
+    logger.info("="*80)
 
 # ===================================================================
 # 🌐 WEB SERVER
 # ===================================================================
-async def health_check(request):
-    return web.json_response({"ok": True, "status": "running", "version": "2.5.0-full"})
-
-async def root_handler(request):
-    return web.json_response({
-        "bot": "MAX Channel Poster",
-        "webhook": "active",
-        "features": ["auth", "media", "buttons", "preview", "schedule", "stats", "markup"],
-        "endpoints": ["/health", "/webhook"]
-    })
+async def health_check(request): return web.json_response({"ok": True, "status": "running", "version": "3.1.0-full"})
+async def root_handler(request): return web.json_response({"bot": "MAX Channel Poster", "webhook": "active"})
 
 async def on_startup(app):
     logger.info("🚀" * 40)
-    logger.info("🚀 STARTING MAX CHANNEL POSTER BOT — FULL FEATURE v2.5")
+    logger.info("🚀 STARTING MAX CHANNEL POSTER BOT — FULL FEATURE v3.1")
     logger.info("🚀" * 40)
-    
-    # Инициализируем компоненты
     app['auth'] = AuthManager(BOT_PASSWORD, AUTH_FILE)
     app['state'] = StateManager()
     app['max_client'] = MAXClient(BOT_TOKEN, BASE_API_URL, API_TIMEOUT)
     app['media_mgr'] = MediaManager(MEDIA_CACHE_DIR, MAX_MEDIA_ITEMS)
     app['stats'] = StatsCollector(STATS_FILE)
-    
     scheduler = PublishScheduler(app['max_client'], CHANNEL_ID)
     scheduler.start()
     app['scheduler'] = scheduler
-    
-    app['handlers'] = CommandHandlers(
-        auth=app['auth'],
-        state=app['state'],
-        max_client=app['max_client'],
-        media_mgr=app['media_mgr'],
-        scheduler=scheduler,
-        stats=app['stats'],
-        channel_id=CHANNEL_ID
-    )
-    
-    # Регистрируем вебхук
+    app['handlers'] = CommandHandlers(app['auth'], app['state'], app['max_client'], app['media_mgr'], scheduler, app['stats'], CHANNEL_ID)
     if RENDER_EXTERNAL_URL:
-        webhook_url = f"{RENDER_EXTERNAL_URL}/webhook"
-        await app['max_client'].register_webhook(webhook_url, CHANNEL_ID)
-    
+        await app['max_client'].register_webhook(f"{RENDER_EXTERNAL_URL}/webhook", CHANNEL_ID)
     logger.info("✅ All components initialized")
 
 async def on_cleanup(app):
     logger.info("🔚 Shutting down...")
-    
-    # Останавливаем планировщик
-    if 'scheduler' in app:
-        app['scheduler'].stop()
-    
-    # Закрываем HTTP-сессию
-    if 'max_client' in app:
-        await app['max_client'].close()
-    
-    # Очищаем кэш медиа
-    if 'media_mgr' in app:
-        app['media_mgr'].cleanup_old_cache(0)
-    
+    if 'scheduler' in app: app['scheduler'].stop()
+    if 'max_client' in app: await app['max_client'].close()
+    if 'media_mgr' in app: app['media_mgr'].cleanup_old_cache(0)
     logger.info("🔚 Cleanup complete")
 
-
 def create_app():
-    """Фабрика приложения"""
     app = web.Application()
-    
-    # Маршруты
-    app.add_routes([
-        web.get('/', root_handler),
-        web.get('/health', health_check),
-        web.post('/webhook', lambda req: webhook_handler(
-            req, 
-            app['handlers'], 
-            lambda text, buttons=None: None
-        )),
-    ])
-    
-    # Хуки жизненного цикла
+    app.add_routes([web.get('/', root_handler), web.get('/health', health_check), web.post('/webhook', lambda req: webhook_handler(req, app['handlers'], lambda t, k=None, b=None: None))])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
-    
     return app
 
-
-# ===================================================================
-# 🚀 ENTRY POINT
-# ===================================================================
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 10000))
     logger.info(f"🌐 Starting server on port {port}")
-    logger.info(f"🔗 Webhook URL: {RENDER_EXTERNAL_URL}/webhook" if RENDER_EXTERNAL_URL else "⚠️ RENDER_EXTERNAL_URL not set")
-    
     app = create_app()
     web.run_app(app, host='0.0.0.0', port=port, access_log=None, print=logger.info)
