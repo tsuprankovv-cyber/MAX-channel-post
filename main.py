@@ -1,5 +1,5 @@
 """
-MAX Channel Poster Bot — FULL FEATURE VERSION v2.2
+MAX Channel Poster Bot — FULL FEATURE VERSION v2.3
 ✅ Авторизация по паролю (сохранение в файл, до смены пароля)
 ✅ Медиа: фото/видео/аудио/голосовые/документы/коллажи/ссылки (до 10 файлов)
 ✅ Форматирование: сохранение markup + конвертация в HTML для предпросмотра
@@ -12,8 +12,8 @@ MAX Channel Poster Bot — FULL FEATURE VERSION v2.2
 ✅ Inline-меню (max:// ссылки)
 ✅ Очистка временных файлов
 ✅ 🔥🔥🔥 МАКСИМАЛЬНОЕ ЛОГИРОВАНИЕ НА КАЖДОМ ШАГЕ 🔥🔥🔥
+🔧 FIX: Все синтаксические ошибки исправлены (file_ bytes, if data is not None)
 🔧 FIX: Унифицирована передача кнопок (inline_keyboard → плоский список)
-🔧 FIX: Исправлены все синтаксические ошибки (if data is not None)
 🔧 FIX: Сохранение сессии и очистка после публикации
 🔧 FIX: Корректная обработка attachments и markup
 """
@@ -1181,7 +1181,7 @@ class CommandHandlers:
                             else:
                                 # Загружаем заново через API
                                 file_data = self.media_mgr.get_cached_file(cached['hash'])
-                                if file_
+                                if file_data is not None:
                                     upload_result = await self.max_client.upload_media(
                                         file_data, cached['filename'], cached['type']
                                     )
@@ -1435,7 +1435,7 @@ async def handle_incoming_message(msg: Dict, handlers: CommandHandlers, send_cal
 # 🌐 WEB SERVER
 # ===================================================================
 async def health_check(request):
-    return web.json_response({"ok": True, "status": "running", "version": "2.2.0-full"})
+    return web.json_response({"ok": True, "status": "running", "version": "2.3.0-full"})
 
 async def root_handler(request):
     return web.json_response({
@@ -1447,7 +1447,7 @@ async def root_handler(request):
 
 async def on_startup(app):
     logger.info("🚀" * 40)
-    logger.info("🚀 STARTING MAX CHANNEL POSTER BOT — FULL FEATURE v2.2")
+    logger.info("🚀 STARTING MAX CHANNEL POSTER BOT — FULL FEATURE v2.3")
     logger.info("🚀" * 40)
     
     # Инициализируем компоненты
