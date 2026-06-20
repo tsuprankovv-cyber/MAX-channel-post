@@ -1,3 +1,0 @@
-aiohttp==3.9.5
-python-dotenv==1.0.1
-apscheduler==3.10.4
