@@ -8,17 +8,22 @@ from core.logger import get_logger
 
 logger = get_logger(__name__)
 
-INLINE_TEMPLATES_FILE = Path('/tmp/max-bot/inline_templates.json')
-BUTTON_TEMPLATES_FILE = Path('/tmp/max-bot/button_templates.json')
+# 🔥 Файлы хранятся в корне проекта — не удаляются при сне Render
+INLINE_TEMPLATES_FILE = Path('inline_templates.json')
+BUTTON_TEMPLATES_FILE = Path('button_templates.json')
 
 
 def _load(file_path: Path) -> Dict:
     if file_path.exists():
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return {}
+                data = json.load(f)
+                logger.info(f"[TEMPLATES] Loaded from {file_path}: {len(data)} users")
+                return data
+        except Exception as e:
+            logger.error(f"[TEMPLATES] Load error: {e}")
+    else:
+        logger.info(f"[TEMPLATES] File not found: {file_path}")
     return {}
 
 
@@ -26,8 +31,9 @@ def _save(file_path: Path, data: Dict):
     try:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+        logger.info(f"[TEMPLATES] Saved to {file_path}")
+    except Exception as e:
+        logger.error(f"[TEMPLATES] Save error: {e}")
 
 
 def parse_name_url(text: str) -> Tuple[Optional[str], Optional[str]]:
@@ -161,7 +167,6 @@ async def handle_inline_add_name(user_id, text, send, state):
     
     state.set_step(user_id, None)
     
-    # Сначала дубликаты — отдельным сообщением
     if duplicates:
         dup_lines = [f"<b>⚠️ Уже есть ({len(duplicates)}):</b>"]
         for name, _, existing in duplicates:
@@ -172,7 +177,6 @@ async def handle_inline_add_name(user_id, text, send, state):
         dup_lines.append("🔙 /templates | 🏠 /start")
         await send('\n'.join(dup_lines))
     
-    # Потом добавленное + предпросмотр
     if added or errors:
         response = []
         
@@ -237,7 +241,6 @@ async def handle_btn_add_name(user_id, text, send, state, max_client=None):
     
     state.set_step(user_id, None)
     
-    # Сначала дубликаты — отдельным сообщением
     if duplicates:
         dup_lines = [f"<b>⚠️ Уже есть ({len(duplicates)}):</b>"]
         for name, _, existing in duplicates:
@@ -248,7 +251,6 @@ async def handle_btn_add_name(user_id, text, send, state, max_client=None):
         dup_lines.append("🔙 /templates | 🏠 /start")
         await send('\n'.join(dup_lines))
     
-    # Потом добавленное + предпросмотр кнопками В ОДНОМ СООБЩЕНИИ
     if added or errors:
         response = []
         
@@ -266,16 +268,10 @@ async def handle_btn_add_name(user_id, text, send, state, max_client=None):
         
         if templates:
             response.append(f"\n<b>👁 Предпросмотр кнопок:</b>")
-            
-            # ОДНО сообщение: текст + кнопки приклеены
-            await send(
-                '\n'.join(response),
-                buttons=[[t] for t in templates]
-            )
+            await send('\n'.join(response), buttons=[[t] for t in templates])
         else:
             await send('\n'.join(response))
         
-        # Меню отдельно
         await send(
             "─────────────────\n"
             "➕ /btn_add | 📋 /btn_list\n"
