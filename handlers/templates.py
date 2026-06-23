@@ -8,7 +8,7 @@ from core.logger import get_logger
 
 logger = get_logger(__name__)
 
-# 🔥 Файлы хранятся в корне проекта — не удаляются при сне Render
+# Файлы хранятся в корне проекта — не удаляются при сне Render
 INLINE_TEMPLATES_FILE = Path('inline_templates.json')
 BUTTON_TEMPLATES_FILE = Path('button_templates.json')
 
@@ -328,15 +328,27 @@ async def handle_inline_del(user_id, index_str, send):
         await send("❌ Укажите номер: /inline_del 1")
 
 
-async def handle_btn_list(user_id, send, max_client=None):
+async def handle_btn_list(user_id, send, state, max_client=None):
     templates = load_button_templates(user_id)
     if not templates:
         await send("📋 Список пуст\n\n─────────────────\n➕ /btn_add | 🔙 /templates | 🏠 /start")
         return
     
+    # Текстовый список
     lines = ["<b>🔘 Кнопки:</b>\n"]
     for i, t in enumerate(templates, 1):
         lines.append(f"{i}. {t['text']}")
+    
+    # Предпросмотр с НАСТОЯЩИМИ кнопками
+    if max_client and state:
+        chat_id = state.get_session(user_id).get('chat_id', user_id)
+        await max_client.send_message(
+            chat_id=chat_id,
+            text="<b>👁 Предпросмотр кнопок:</b>",
+            buttons=[[t] for t in templates],
+            use_html_format=True
+        )
+    
     lines.append("\n─────────────────")
     lines.append("➕ /btn_add | 🗑 /btn_del N")
     lines.append("🔙 /templates | 🏠 /start")
