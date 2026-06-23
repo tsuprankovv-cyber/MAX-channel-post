@@ -24,7 +24,8 @@ SCHEDULER_TIMEZONE = os.getenv('SCHEDULER_TIMEZONE', 'UTC')
 API_TIMEOUT = int(os.getenv('API_TIMEOUT', '120'))
 
 # === Пути ===
-DATA_DIR = Path(os.getenv('DATA_DIR', '/tmp/max-bot'))
+# 🔥 Используем корень проекта вместо /tmp/ чтобы файлы не удалялись при сне
+DATA_DIR = Path(os.getenv('DATA_DIR', '.'))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 AUTH_FILE = DATA_DIR / 'authorized_users.json'
 STATS_FILE = DATA_DIR / 'stats.json'
