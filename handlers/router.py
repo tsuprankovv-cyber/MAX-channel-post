@@ -158,7 +158,7 @@ def create_router(auth, state, max_client, media_mgr, scheduler, stats, channel_
             await handle_btn_add_start(user_id, send, state)
         
         elif cmd == '/btn_list':
-            await handle_btn_list(user_id, send, max_client)
+            await handle_btn_list(user_id, send, state, max_client)
         
         elif cmd.startswith('/btn_del '):
             await handle_btn_del(user_id, cmd.replace('/btn_del ', ''), send)
@@ -267,7 +267,7 @@ def create_router(auth, state, max_client, media_mgr, scheduler, stats, channel_
             await handle_post_text(user_id, text, markup, raw_attachments, send, state, media_mgr)
             await send_preview(user_id, send, state, max_client)
         
-        # 🔥 Шаги добавления шаблонов
+        # Шаги добавления шаблонов
         elif step == 'inline_add_name':
             await handle_inline_add_name(user_id, text, send, state)
         
